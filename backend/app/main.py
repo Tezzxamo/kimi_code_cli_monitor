@@ -122,8 +122,7 @@ def list_work_dirs(limit: int = Query(default=200, ge=1, le=2000)) -> JSONRespon
 def get_statistics() -> JSONResponse:
     """
     全量扫描所有会话的 wire.jsonl，生成统计摘要。
-    注意：此接口不做缓存，每次请求都会重新遍历目录并读取文件；
-    在会话数或文件体积极大时可能产生较高的 CPU/IO 开销。
+    结果在内存中按 share_dir 缓存 10 秒，以降低重复请求的 CPU/IO 开销。
     """
     settings = get_settings()
     cache_key = str(settings.kimi_share_dir)

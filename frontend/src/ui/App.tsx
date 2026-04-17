@@ -383,7 +383,9 @@ function getApprovalRequestDetails(evt: Record<string, unknown> | undefined): { 
   const op = asString(parsed.flat["message.payload.operation"]) ?? asString(parsed.flat["payload.operation"]);
   const filesRaw = parsed.flat["message.payload.files"] ?? parsed.flat["payload.files"];
   let files: string[] = [];
-  if (Array.isArray(filesRaw)) {
+  if (typeof filesRaw === "string") {
+    files = filesRaw.split(", ").filter(Boolean);
+  } else if (Array.isArray(filesRaw)) {
     files = filesRaw.map((f) => (typeof f === "string" ? f : "")).filter(Boolean);
   }
   return { operation: op, files };
@@ -883,11 +885,11 @@ function DailyUsageChart({
   );
 }
 
-function TokenBar({ label, value, total, color, bg }: { label: string; value: number; total: number; color: string; bg: string }) {
+function TokenBar({ label, value, total, color, bg, labelColor }: { label: string; value: number; total: number; color: string; bg: string; labelColor: string }) {
   const pct = total > 0 ? (value / total) * 100 : 0;
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-      <span style={{ width: 90, color: "#9ca3af", fontSize: 11 }}>{label}</span>
+      <span style={{ width: 90, color: labelColor, fontSize: 11 }}>{label}</span>
       <div style={{ flex: 1, height: 8, background: bg, borderRadius: 4, overflow: "hidden" }}>
         <div style={{ width: `${pct}%`, height: "100%", background: color, borderRadius: 4 }} />
       </div>
@@ -1129,10 +1131,10 @@ function EventCard({ msg, theme }: { msg: StreamMessage; theme: Theme }) {
               const total = Math.max(1, tokenUsage.input_cache_read + tokenUsage.input_cache_creation + tokenUsage.input_other + tokenUsage.output);
               return (
                 <div style={{ flex: 1, minWidth: 0, fontSize: 12, lineHeight: 1.6, display: "flex", flexDirection: "column", gap: 4 }}>
-                  <TokenBar label="output" value={tokenUsage.output} total={total} color="#22c55e" bg={theme === "dark" ? "#1f1f1f" : "#f1f5f9"} />
-                  <TokenBar label="cache read" value={tokenUsage.input_cache_read} total={total} color="#3b82f6" bg={theme === "dark" ? "#1f1f1f" : "#f1f5f9"} />
-                  <TokenBar label="cache creation" value={tokenUsage.input_cache_creation} total={total} color="#a855f7" bg={theme === "dark" ? "#1f1f1f" : "#f1f5f9"} />
-                  <TokenBar label="other input" value={tokenUsage.input_other} total={total} color="#f59e0b" bg={theme === "dark" ? "#1f1f1f" : "#f1f5f9"} />
+                  <TokenBar label="output" value={tokenUsage.output} total={total} color="#22c55e" bg={theme === "dark" ? "#1f1f1f" : "#f1f5f9"} labelColor={c.textMuted} />
+                  <TokenBar label="cache read" value={tokenUsage.input_cache_read} total={total} color="#3b82f6" bg={theme === "dark" ? "#1f1f1f" : "#f1f5f9"} labelColor={c.textMuted} />
+                  <TokenBar label="cache creation" value={tokenUsage.input_cache_creation} total={total} color="#a855f7" bg={theme === "dark" ? "#1f1f1f" : "#f1f5f9"} labelColor={c.textMuted} />
+                  <TokenBar label="other input" value={tokenUsage.input_other} total={total} color="#f59e0b" bg={theme === "dark" ? "#1f1f1f" : "#f1f5f9"} labelColor={c.textMuted} />
                 </div>
               );
             })()
@@ -1359,7 +1361,7 @@ export function App() {
   }, [c.bg]);
 
   useEffect(() => {
-    Promise.all([refreshSessions(), fetchStatistics()]).catch((e) => setStatus(String(e)));
+    Promise.all([refreshSessions(), fetchStatistics()]).catch((e) => setStatus(e instanceof Error ? e.message : String(e)));
     const t = window.setInterval(() => {
       refreshSessions().catch(() => void 0);
     }, 10000);
@@ -1375,6 +1377,11 @@ export function App() {
   useEffect(() => {
     if (!selectedSessionId) {
       setStatus("请选择会话");
+      return;
+    }
+
+    if (isTraceMode) {
+      setStatus("回放模式");
       return;
     }
 
@@ -1447,7 +1454,7 @@ export function App() {
         es = null;
       }
     };
-  }, [selectedSessionId, sseReconnectTrigger]);
+  }, [selectedSessionId, sseReconnectTrigger, isTraceMode]);
 
   const filteredTraceEvents = useMemo(() => {
     if (!traceKeyword.trim()) return traceEvents;
@@ -1488,7 +1495,7 @@ export function App() {
       setTracePageSize(data.pagination.page_size);
       setTraceTotalPages(data.pagination.total_pages);
     } catch (e) {
-      setStatus(String(e));
+      setStatus(e instanceof Error ? e.message : String(e));
     } finally {
       setTraceLoading(false);
     }
@@ -1499,7 +1506,7 @@ export function App() {
     setIsTraceMode(true);
     setTracePage(1);
     setTraceKeyword("");
-    loadTracePage(selectedSessionId, 1, 100);
+    loadTracePage(selectedSessionId, 1, tracePageSize || 100);
   }
 
   function exitTraceMode() {
@@ -1518,6 +1525,11 @@ export function App() {
   function selectSession(sessionId: string) {
     setSelectedSessionId(sessionId);
     requestNotificationPermission();
+    if (isTraceMode) {
+      setTracePage(1);
+      setTraceKeyword("");
+      loadTracePage(sessionId, 1, tracePageSize || 100);
+    }
   }
 
   function deselectSession() {
@@ -2185,8 +2197,10 @@ export function App() {
                         style={{ ...inputStyle, minWidth: 88 }}
                         value={tracePageSize}
                         onChange={(e) => {
-                          setTracePageSize(Number(e.target.value));
+                          const nextSize = Number(e.target.value);
+                          setTracePageSize(nextSize);
                           setTracePage(1);
+                          loadTracePage(selectedSessionId, 1, nextSize);
                         }}
                       >
                         {[10, 20, 50, 100].map((n) => (
@@ -2196,7 +2210,15 @@ export function App() {
                         ))}
                       </select>
                     </label>
-                    <button style={btnGhostStyle} onClick={() => setTracePage((p) => Math.max(1, p - 1))} disabled={safeTraceEventPage <= 1}>
+                    <button
+                      style={btnGhostStyle}
+                      onClick={() => {
+                        const next = Math.max(1, safeTraceEventPage - 1);
+                        setTracePage(next);
+                        loadTracePage(selectedSessionId, next, tracePageSize);
+                      }}
+                      disabled={safeTraceEventPage <= 1}
+                    >
                       上一页
                     </button>
                     <span style={{ color: c.textSecondary, fontSize: 13 }}>
@@ -2204,7 +2226,11 @@ export function App() {
                     </span>
                     <button
                       style={btnGhostStyle}
-                      onClick={() => setTracePage((p) => Math.min(traceTotalEventPages, p + 1))}
+                      onClick={() => {
+                        const next = Math.min(traceTotalEventPages, safeTraceEventPage + 1);
+                        setTracePage(next);
+                        loadTracePage(selectedSessionId, next, tracePageSize);
+                      }}
                       disabled={safeTraceEventPage >= traceTotalEventPages}
                     >
                       下一页
