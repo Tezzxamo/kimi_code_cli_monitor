@@ -23,6 +23,10 @@ from .settings import get_settings
 
 app = FastAPI(title="Kimi CLI Realtime Monitor", version="0.1.0")
 
+# Simple in-memory cache for /api/statistics
+_statistics_cache: dict[str, tuple[float, dict]] = {}
+_statistics_ttl_seconds = 10.0
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -122,6 +126,12 @@ def get_statistics() -> JSONResponse:
     在会话数或文件体积极大时可能产生较高的 CPU/IO 开销。
     """
     settings = get_settings()
+    cache_key = str(settings.kimi_share_dir)
+    now = datetime.now(timezone.utc).timestamp()
+    cached = _statistics_cache.get(cache_key)
+    if cached and (now - cached[0]) < _statistics_ttl_seconds:
+        return JSONResponse(cached[1])
+
     work_dir_map = load_work_dir_map(settings.kimi_share_dir)
 
     total_sessions = 0
@@ -278,15 +288,50 @@ def get_statistics() -> JSONResponse:
         key=lambda x: -x["turns"],
     )[:20]
 
+    result = {
+        "total_sessions": total_sessions,
+        "total_turns": total_turns,
+        "total_tokens": total_tokens,
+        "total_duration_ms": int(total_duration_ms),
+        "daily_usage": daily_usage,
+        "tool_usage": tool_usage,
+        "top_projects": top_projects,
+    }
+    _statistics_cache[cache_key] = (now, result)
+    return JSONResponse(result)
+
+
+@app.get("/api/trace")
+def get_trace(
+    session_id: str = Query(..., min_length=1),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=100, ge=1, le=2000),
+) -> JSONResponse:
+    """
+    分页读取某个会话的完整 wire.jsonl 历史事件，用于 Trace 回放模式。
+    """
+    settings = get_settings()
+    s = resolve_session(settings.kimi_share_dir, session_id)
+    if not s:
+        raise HTTPException(status_code=404, detail="session not found")
+
+    all_items, _ = read_jsonl_since(s.wire_path, since_offset=0)
+    total = len(all_items)
+    start = (page - 1) * page_size
+    end = start + page_size
+    paged = all_items[start:end]
+
+    events = [{"type": "wire", "time": _now_iso(), "event": obj} for obj in paged]
     return JSONResponse(
         {
-            "total_sessions": total_sessions,
-            "total_turns": total_turns,
-            "total_tokens": total_tokens,
-            "total_duration_ms": int(total_duration_ms),
-            "daily_usage": daily_usage,
-            "tool_usage": tool_usage,
-            "top_projects": top_projects,
+            "session_id": session_id,
+            "events": events,
+            "pagination": {
+                "page": page,
+                "page_size": page_size,
+                "total": total,
+                "total_pages": (total + page_size - 1) // page_size,
+            },
         }
     )
 
@@ -309,7 +354,7 @@ async def stream(
         meta = {"type": "meta", "time": _now_iso(), "session_id": session_id}
         yield f"data: {json.dumps(meta, ensure_ascii=False)}\n\n"
         async for obj in tail_jsonl(s.wire_path, poll_interval_s=poll_interval_s, state=st):
-            payload = {"type": "wire", "time": _now_iso(), "event": obj}
+            payload = {"type": "wire", "time": _now_iso(), "event": obj, "next_offset": st.offset}
             yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(gen(), media_type="text/event-stream")

@@ -26,7 +26,7 @@ type SessionsResponse = {
 
 type StreamMessage =
   | { type: "meta"; time: string; session_id: string }
-  | { type: "wire"; time: string; event: Record<string, unknown> };
+  | { type: "wire"; time: string; event: Record<string, unknown>; next_offset?: number };
 
 type StatisticsResponse = {
   total_sessions: number;
@@ -322,6 +322,85 @@ function getErrorDetails(evt: Record<string, unknown> | undefined): { output?: s
     }
   }
   return {};
+}
+
+function requestNotificationPermission() {
+  if (typeof window !== "undefined" && "Notification" in window && window.Notification.permission === "default") {
+    window.Notification.requestPermission();
+  }
+}
+
+function maybeNotify(msg: StreamMessage) {
+  if (typeof window === "undefined" || !("Notification" in window)) return;
+  if (window.Notification.permission !== "granted") return;
+  if (document.visibilityState === "visible") return;
+
+  if (msg.type !== "wire") return;
+  const kind = getDetailedEventKind(msg);
+  const evt = msg.event;
+
+  if (kind === "ApprovalRequest") {
+    new window.Notification("Kimi CLI Monitor", { body: "收到新的操作确认请求" });
+  } else if (kind === "ToolResult" && eventHasError(evt)) {
+    new window.Notification("Kimi CLI Monitor", { body: "工具调用发生异常" });
+  }
+}
+
+function getToolCallArgs(evt: Record<string, unknown> | undefined): string | undefined {
+  if (!evt) return undefined;
+  const parsed = parseWireEvent(evt);
+  const args =
+    asString(parsed.flat["message.payload.arguments"]) ??
+    asString(parsed.flat["message.payload.function.arguments"]) ??
+    asString(parsed.flat["payload.arguments"]) ??
+    asString(parsed.flat["payload.function.arguments"]);
+  if (!args) return undefined;
+  try {
+    const obj = JSON.parse(args);
+    return JSON.stringify(obj, null, 2);
+  } catch {
+    return args.length > 300 ? args.slice(0, 300) + "..." : args;
+  }
+}
+
+function getToolResultDetails(evt: Record<string, unknown> | undefined): { tool_call_id?: string; return_value?: string; is_error?: boolean } {
+  if (!evt) return {};
+  const parsed = parseWireEvent(evt);
+  const id = asString(parsed.flat["message.payload.tool_call_id"]) ?? asString(parsed.flat["payload.tool_call_id"]);
+  const isErr = parsed.flat["message.payload.is_error"] === true || parsed.flat["payload.is_error"] === true;
+  const rv = parsed.flat["message.payload.return_value"] ?? parsed.flat["payload.return_value"];
+  let rvStr: string | undefined;
+  if (rv !== undefined) {
+    rvStr = typeof rv === "string" ? rv : JSON.stringify(rv);
+    if (rvStr.length > 500) rvStr = rvStr.slice(0, 500) + "...";
+  }
+  return { tool_call_id: id, return_value: rvStr, is_error: isErr };
+}
+
+function getApprovalRequestDetails(evt: Record<string, unknown> | undefined): { operation?: string; files?: string[] } {
+  if (!evt) return {};
+  const parsed = parseWireEvent(evt);
+  const op = asString(parsed.flat["message.payload.operation"]) ?? asString(parsed.flat["payload.operation"]);
+  const filesRaw = parsed.flat["message.payload.files"] ?? parsed.flat["payload.files"];
+  let files: string[] = [];
+  if (Array.isArray(filesRaw)) {
+    files = filesRaw.map((f) => (typeof f === "string" ? f : "")).filter(Boolean);
+  }
+  return { operation: op, files };
+}
+
+function getTokenUsage(evt: Record<string, unknown> | undefined): { input_cache_read: number; input_cache_creation: number; input_other: number; output: number } | undefined {
+  if (!evt) return undefined;
+  const parsed = parseWireEvent(evt);
+  const tu = parsed.flat["message.payload.token_usage"] ?? parsed.flat["payload.token_usage"];
+  if (!tu || typeof tu !== "object") return undefined;
+  const t = tu as Record<string, unknown>;
+  return {
+    input_cache_read: typeof t.input_cache_read === "number" ? t.input_cache_read : 0,
+    input_cache_creation: typeof t.input_cache_creation === "number" ? t.input_cache_creation : 0,
+    input_other: typeof t.input_other === "number" ? t.input_other : 0,
+    output: typeof t.output === "number" ? t.output : 0,
+  };
 }
 
 function EventTreeNode({
@@ -804,6 +883,19 @@ function DailyUsageChart({
   );
 }
 
+function TokenBar({ label, value, total, color, bg }: { label: string; value: number; total: number; color: string; bg: string }) {
+  const pct = total > 0 ? (value / total) * 100 : 0;
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+      <span style={{ width: 90, color: "#9ca3af", fontSize: 11 }}>{label}</span>
+      <div style={{ flex: 1, height: 8, background: bg, borderRadius: 4, overflow: "hidden" }}>
+        <div style={{ width: `${pct}%`, height: "100%", background: color, borderRadius: 4 }} />
+      </div>
+      <span style={{ width: 50, textAlign: "right", fontFamily: "Consolas, Menlo, monospace", fontSize: 11 }}>{value}</span>
+    </div>
+  );
+}
+
 function EventCard({ msg, theme }: { msg: StreamMessage; theme: Theme }) {
   const c = COLORS[theme];
   const kind = getDetailedEventKind(msg);
@@ -820,6 +912,10 @@ function EventCard({ msg, theme }: { msg: StreamMessage; theme: Theme }) {
   const thinkText = msg.type === "wire" && effectiveKind === "ThinkPart" ? getThinkText(effectiveEvent) : undefined;
   const textPartText = msg.type === "wire" && effectiveKind === "TextPart" ? getTextPartText(effectiveEvent) : undefined;
   const toolCall = msg.type === "wire" && effectiveKind === "ToolCall" ? getToolCallSummary(effectiveEvent) : undefined;
+  const toolArgs = msg.type === "wire" && effectiveKind === "ToolCall" ? getToolCallArgs(effectiveEvent) : undefined;
+  const toolResult = msg.type === "wire" && effectiveKind === "ToolResult" ? getToolResultDetails(effectiveEvent) : undefined;
+  const approvalReq = msg.type === "wire" && effectiveKind === "ApprovalRequest" ? getApprovalRequestDetails(effectiveEvent) : undefined;
+  const tokenUsage = msg.type === "wire" && effectiveKind === "StatusUpdate" ? getTokenUsage(effectiveEvent) : undefined;
 
   return (
     <div
@@ -930,32 +1026,116 @@ function EventCard({ msg, theme }: { msg: StreamMessage; theme: Theme }) {
               );
             })()
           ) : textPartText !== undefined ? (
-            <div style={{ flex: 1, minWidth: 0, fontSize: 13, lineHeight: 1.6 }}>
+            <div style={{ flex: 1, minWidth: 0, fontSize: 13, lineHeight: 1.6, background: theme === "dark" ? "rgba(255,255,255,0.04)" : "#f8fafc", padding: 8, borderRadius: 6, border: `1px solid ${c.border}` }}>
               <span style={{ color: c.text, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{textPartText}</span>
             </div>
           ) : thinkText !== undefined ? (
-            <div style={{ flex: 1, minWidth: 0, fontSize: 13, lineHeight: 1.6 }}>
+            <div style={{ flex: 1, minWidth: 0, fontSize: 13, lineHeight: 1.6, background: theme === "dark" ? "rgba(255,255,255,0.04)" : "#f8fafc", padding: 8, borderRadius: 6, border: `1px solid ${c.border}` }}>
               <span style={{ color: c.text, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{thinkText}</span>
             </div>
           ) : toolCall && (toolCall.id || toolCall.name) ? (
-            <div style={{ flex: 1, minWidth: 0, fontSize: 13, lineHeight: 1.6, display: "flex", gap: 8, alignItems: "center" }}>
-              {toolCall.id ? (
-                <span
+            <div style={{ flex: 1, minWidth: 0, fontSize: 13, lineHeight: 1.6, display: "flex", flexDirection: "column", gap: 6 }}>
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                {toolCall.id ? (
+                  <code
+                    style={{
+                      color: c.textMuted,
+                      fontFamily: "Consolas, Menlo, monospace",
+                      fontSize: 12,
+                      padding: "2px 6px",
+                      borderRadius: 4,
+                      border: `1px solid ${c.border}`,
+                      background: c.surfaceElevated
+                    }}
+                  >
+                    {toolCall.id}
+                  </code>
+                ) : null}
+                {toolCall.name ? <span style={{ color: c.text }}>{toolCall.name}()</span> : null}
+              </div>
+              {toolArgs ? (
+                <pre style={{ margin: 0, background: c.codeBg, padding: 8, borderRadius: 6, fontSize: 12, overflow: "auto", border: `1px solid ${c.border}` }}>
+                  <code style={{ color: c.text }}>{toolArgs}</code>
+                </pre>
+              ) : null}
+            </div>
+          ) : toolResult && (toolResult.tool_call_id || toolResult.return_value) ? (
+            <div style={{ flex: 1, minWidth: 0, fontSize: 13, lineHeight: 1.6, display: "flex", flexDirection: "column", gap: 4 }}>
+              {toolResult.tool_call_id ? (
+                <div>
+                  <span style={{ color: c.textMuted }}>tool_call_id: </span>
+                  <code
+                    style={{
+                      fontFamily: "Consolas, Menlo, monospace",
+                      fontSize: 12,
+                      padding: "2px 6px",
+                      borderRadius: 4,
+                      border: `1px solid ${c.border}`,
+                      background: c.surfaceElevated
+                    }}
+                  >
+                    {toolResult.tool_call_id}
+                  </code>
+                </div>
+              ) : null}
+              {toolResult.return_value !== undefined ? (
+                <pre
                   style={{
-                    color: c.textMuted,
-                    fontFamily: "Consolas, Menlo, monospace",
+                    margin: 0,
+                    background: toolResult.is_error ? (theme === "dark" ? "rgba(239,68,68,0.10)" : "#fef2f2") : c.codeBg,
+                    padding: 8,
+                    borderRadius: 6,
                     fontSize: 12,
-                    padding: "2px 6px",
-                    borderRadius: 4,
-                    border: `1px solid ${c.border}`,
-                    background: c.surfaceElevated
+                    overflow: "auto",
+                    border: `1px solid ${toolResult.is_error ? (theme === "dark" ? "rgba(239,68,68,0.3)" : "#fecaca") : c.border}`
                   }}
                 >
-                  {toolCall.id}
-                </span>
+                  <code style={{ color: c.text }}>{toolResult.return_value}</code>
+                </pre>
               ) : null}
-              {toolCall.name ? <span style={{ color: c.text }}>{toolCall.name}()</span> : null}
             </div>
+          ) : approvalReq && (approvalReq.operation || (approvalReq.files && approvalReq.files.length > 0)) ? (
+            <div style={{ flex: 1, minWidth: 0, fontSize: 13, lineHeight: 1.6, display: "flex", flexDirection: "column", gap: 4 }}>
+              {approvalReq.operation ? (
+                <div>
+                  <span style={{ color: c.textMuted }}>操作: </span>
+                  <span style={{ color: c.text }}>{approvalReq.operation}</span>
+                </div>
+              ) : null}
+              {approvalReq.files && approvalReq.files.length > 0 ? (
+                <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                  <span style={{ color: c.textMuted }}>涉及文件:</span>
+                  {approvalReq.files.map((f, i) => (
+                    <code
+                      key={i}
+                      style={{
+                        fontFamily: "Consolas, Menlo, monospace",
+                        fontSize: 12,
+                        padding: "2px 6px",
+                        borderRadius: 4,
+                        border: `1px solid ${c.border}`,
+                        background: c.surfaceElevated,
+                        color: c.text
+                      }}
+                    >
+                      {f}
+                    </code>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          ) : tokenUsage ? (
+            (() => {
+              const total = Math.max(1, tokenUsage.input_cache_read + tokenUsage.input_cache_creation + tokenUsage.input_other + tokenUsage.output);
+              return (
+                <div style={{ flex: 1, minWidth: 0, fontSize: 12, lineHeight: 1.6, display: "flex", flexDirection: "column", gap: 4 }}>
+                  <TokenBar label="output" value={tokenUsage.output} total={total} color="#22c55e" bg={theme === "dark" ? "#1f1f1f" : "#f1f5f9"} />
+                  <TokenBar label="cache read" value={tokenUsage.input_cache_read} total={total} color="#3b82f6" bg={theme === "dark" ? "#1f1f1f" : "#f1f5f9"} />
+                  <TokenBar label="cache creation" value={tokenUsage.input_cache_creation} total={total} color="#a855f7" bg={theme === "dark" ? "#1f1f1f" : "#f1f5f9"} />
+                  <TokenBar label="other input" value={tokenUsage.input_other} total={total} color="#f59e0b" bg={theme === "dark" ? "#1f1f1f" : "#f1f5f9"} />
+                </div>
+              );
+            })()
           ) : stepN !== undefined ? (
             <div style={{ flex: 1, minWidth: 0, fontSize: 13, lineHeight: 1.6 }}>
               <span style={{ color: c.textMuted }}>step: </span>
@@ -1037,7 +1217,6 @@ export function App() {
   const [eventKindFilter, setEventKindFilter] = useState<string>("");
   const [eventErrorFilter, setEventErrorFilter] = useState<"all" | "error" | "normal">("all");
   const eventOffsetRef = useRef<number>(0);
-  const isFetchingEventsRef = useRef<boolean>(false);
 
   const [sidebarSearch, setSidebarSearch] = useState<string>("");
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set());
@@ -1045,6 +1224,16 @@ export function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [currentView, setCurrentView] = useState<"monitor" | "statistics">("monitor");
   const [statistics, setStatistics] = useState<StatisticsResponse | null>(null);
+  const [sseReconnectTrigger, setSseReconnectTrigger] = useState<number>(0);
+
+  // Trace playback mode
+  const [isTraceMode, setIsTraceMode] = useState(false);
+  const [traceEvents, setTraceEvents] = useState<StreamMessage[]>([]);
+  const [tracePage, setTracePage] = useState(1);
+  const [tracePageSize, setTracePageSize] = useState(100);
+  const [traceTotalPages, setTraceTotalPages] = useState(1);
+  const [traceKeyword, setTraceKeyword] = useState("");
+  const [traceLoading, setTraceLoading] = useState(false);
 
   async function fetchStatistics() {
     try {
@@ -1189,45 +1378,146 @@ export function App() {
       return;
     }
 
-    setStatus("已连接");
-    isFetchingEventsRef.current = false;
-    resetCurrentSessionEvents();
+    setStatus("连接中...");
+    let es: EventSource | null = null;
+    let reconnectTimer = 0;
+    let isCleanClose = false;
 
-    const init = window.setTimeout(() => {
-      fetchEventsOnce(selectedSessionId).catch(() => setStatus("连接异常（轮询失败）"));
-    }, 0);
+    function connect() {
+      if (es) {
+        es.close();
+        es = null;
+      }
+      isCleanClose = false;
+      const qs = new URLSearchParams({
+        session_id: selectedSessionId,
+        since_offset: String(eventOffsetRef.current)
+      });
+      es = new EventSource(`/api/stream?${qs.toString()}`);
 
-    const t = window.setInterval(() => {
-      if (isFetchingEventsRef.current) return;
-      isFetchingEventsRef.current = true;
-      fetchEventsOnce(selectedSessionId)
-        .then(() => setStatus("已连接"))
-        .catch(() => setStatus("连接异常（轮询失败）"))
-        .finally(() => {
-          isFetchingEventsRef.current = false;
-        });
-    }, 5000);
+      es.onopen = () => {
+        setStatus("已连接（SSE）");
+      };
+
+      es.onmessage = (e) => {
+        try {
+          const data = JSON.parse(e.data) as StreamMessage & { next_offset?: number };
+          if (data.type === "wire") {
+            setEvents((prev) => {
+              const base = prev.length > 2000 ? prev.slice(-1500) : prev;
+              return [...base, data];
+            });
+            setEventPage(1);
+            if (typeof data.next_offset === "number") {
+              eventOffsetRef.current = data.next_offset;
+            }
+            maybeNotify(data);
+          }
+        } catch {
+          // ignore malformed SSE message
+        }
+      };
+
+      es.onerror = () => {
+        setStatus("连接异常（尝试重连）");
+        if (es) {
+          es.close();
+          es = null;
+        }
+        if (!isCleanClose) {
+          reconnectTimer = window.setTimeout(() => {
+            connect();
+          }, 3000);
+        }
+      };
+    }
+
+    fetchEventsOnce(selectedSessionId)
+      .then(() => connect())
+      .catch(() => {
+        setStatus("连接异常（初始化失败）");
+        connect();
+      });
 
     return () => {
-      window.clearTimeout(init);
-      window.clearInterval(t);
-      isFetchingEventsRef.current = false;
+      isCleanClose = true;
+      window.clearTimeout(reconnectTimer);
+      if (es) {
+        es.close();
+        es = null;
+      }
     };
-  }, [selectedSessionId]);
+  }, [selectedSessionId, sseReconnectTrigger]);
+
+  const filteredTraceEvents = useMemo(() => {
+    if (!traceKeyword.trim()) return traceEvents;
+    const q = traceKeyword.trim().toLowerCase();
+    return traceEvents.filter((e) => {
+      if (e.type !== "wire") return false;
+      const kind = getDetailedEventKind(e);
+      if (kind.toLowerCase().includes(q)) return true;
+      try {
+        const text = JSON.stringify(e.event).toLowerCase();
+        return text.includes(q);
+      } catch {
+        return false;
+      }
+    });
+  }, [traceEvents, traceKeyword]);
+
+  const traceTotalEventPages = Math.max(1, Math.ceil(filteredTraceEvents.length / tracePageSize));
+  const safeTraceEventPage = Math.min(tracePage, traceTotalEventPages);
+  const pagedTraceEvents = filteredTraceEvents.slice((safeTraceEventPage - 1) * tracePageSize, safeTraceEventPage * tracePageSize);
+
+  async function loadTracePage(sessionId: string, page: number, pageSize: number) {
+    setTraceLoading(true);
+    try {
+      const qs = new URLSearchParams({
+        session_id: sessionId,
+        page: String(page),
+        page_size: String(pageSize)
+      });
+      const res = await fetch(`/api/trace?${qs.toString()}`);
+      if (!res.ok) throw new Error(`trace http ${res.status}`);
+      const data = (await res.json()) as {
+        events: StreamMessage[];
+        pagination: { page: number; page_size: number; total: number; total_pages: number };
+      };
+      setTraceEvents(data.events);
+      setTracePage(data.pagination.page);
+      setTracePageSize(data.pagination.page_size);
+      setTraceTotalPages(data.pagination.total_pages);
+    } catch (e) {
+      setStatus(String(e));
+    } finally {
+      setTraceLoading(false);
+    }
+  }
+
+  function enterTraceMode() {
+    if (!selectedSessionId) return;
+    setIsTraceMode(true);
+    setTracePage(1);
+    setTraceKeyword("");
+    loadTracePage(selectedSessionId, 1, 100);
+  }
+
+  function exitTraceMode() {
+    setIsTraceMode(false);
+    setTraceEvents([]);
+    setTraceKeyword("");
+    setTracePage(1);
+  }
 
   async function handleReconnect() {
     if (!selectedSessionId) return;
     resetCurrentSessionEvents();
-    try {
-      await fetchEventsOnce(selectedSessionId);
-      setStatus("已连接");
-    } catch {
-      setStatus("连接异常（轮询失败）");
-    }
+    setSseReconnectTrigger((n) => n + 1);
   }
 
   function selectSession(sessionId: string) {
     setSelectedSessionId(sessionId);
+    requestNotificationPermission();
   }
 
   function deselectSession() {
@@ -1831,19 +2121,33 @@ export function App() {
             <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
               <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
                 <div>
-                  <div style={{ fontWeight: 700, fontSize: 15, color: c.text }}>实时事件监控</div>
+                  <div style={{ fontWeight: 700, fontSize: 15, color: c.text }}>
+                    {isTraceMode ? "历史事件回放" : "实时事件监控"}
+                  </div>
                   <div style={{ marginTop: 2, color: c.textMuted, fontSize: 12 }}>
-                    会话：{renderTruncatedCode(selectedSessionId || "-", 360)} | 最新事件：{latestEvent ? getDetailedEventKind(latestEvent) : "-"}
+                    会话：{renderTruncatedCode(selectedSessionId || "-", 360)}
+                    {!isTraceMode ? ` | 最新事件：${latestEvent ? getDetailedEventKind(latestEvent) : "-"}` : null}
                   </div>
                 </div>
               </div>
             </div>
             <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-              <StatPill title="状态" value={status} tone={connectedTone} theme={theme} />
-              <StatPill title="事件数" value={String(events.length)} theme={theme} />
-              <button style={btnGhostStyle} onClick={handleReconnect} disabled={!selectedSessionId}>
-                重连流
-              </button>
+              {!isTraceMode ? (
+                <>
+                  <StatPill title="状态" value={status} tone={connectedTone} theme={theme} />
+                  <StatPill title="事件数" value={String(events.length)} theme={theme} />
+                  <button style={btnGhostStyle} onClick={handleReconnect} disabled={!selectedSessionId}>
+                    重连流
+                  </button>
+                  <button style={btnGhostStyle} onClick={enterTraceMode} disabled={!selectedSessionId}>
+                    历史回放
+                  </button>
+                </>
+              ) : (
+                <button style={btnGhostStyle} onClick={exitTraceMode}>
+                  返回实时监控
+                </button>
+              )}
             </div>
           </div>
 
@@ -1864,6 +2168,65 @@ export function App() {
                 <div style={{ fontSize: 18, fontWeight: 600, color: c.textSecondary }}>请选择会话</div>
                 <div style={{ fontSize: 14 }}>从左侧边栏选择一个 Session 开始实时监控</div>
               </div>
+            ) : isTraceMode ? (
+              <>
+                <div style={toolbarRowStyle(c)}>
+                  <div style={filtersStyle}>
+                    <input
+                      type="text"
+                      placeholder="搜索关键字或事件类型..."
+                      value={traceKeyword}
+                      onChange={(e) => { setTraceKeyword(e.target.value); setTracePage(1); }}
+                      style={{ ...inputStyle, minWidth: 200 }}
+                    />
+                    <label style={fieldLabelStyle(c)}>
+                      每页
+                      <select
+                        style={{ ...inputStyle, minWidth: 88 }}
+                        value={tracePageSize}
+                        onChange={(e) => {
+                          setTracePageSize(Number(e.target.value));
+                          setTracePage(1);
+                        }}
+                      >
+                        {[10, 20, 50, 100].map((n) => (
+                          <option key={n} value={n}>
+                            {n}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <button style={btnGhostStyle} onClick={() => setTracePage((p) => Math.max(1, p - 1))} disabled={safeTraceEventPage <= 1}>
+                      上一页
+                    </button>
+                    <span style={{ color: c.textSecondary, fontSize: 13 }}>
+                      第 <b>{safeTraceEventPage}</b> / {traceTotalEventPages} 页，共 {filteredTraceEvents.length} 条（服务端共 {traceTotalPages} 页）
+                    </span>
+                    <button
+                      style={btnGhostStyle}
+                      onClick={() => setTracePage((p) => Math.min(traceTotalEventPages, p + 1))}
+                      disabled={safeTraceEventPage >= traceTotalEventPages}
+                    >
+                      下一页
+                    </button>
+                    <button style={btnGhostStyle} onClick={() => loadTracePage(selectedSessionId, tracePage, tracePageSize)} disabled={traceLoading}>
+                      {traceLoading ? "加载中..." : "刷新"}
+                    </button>
+                  </div>
+                </div>
+
+                <div style={timelinePanelStyle(c)}>
+                  {traceLoading ? (
+                    <div style={{ padding: 16, color: c.textMuted }}>加载中...</div>
+                  ) : filteredTraceEvents.length === 0 ? (
+                    <div style={{ padding: 16, color: c.textMuted }}>当前页暂无匹配事件</div>
+                  ) : (
+                    pagedTraceEvents.map((e, idx) => (
+                      <EventCard key={`trace-${safeTraceEventPage}-${idx}`} msg={e} theme={theme} />
+                    ))
+                  )}
+                </div>
+              </>
             ) : (
               <>
                 <div style={toolbarRowStyle(c)}>
