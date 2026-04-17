@@ -1954,20 +1954,6 @@ export function App() {
                 K
               </div>
               <div style={{ fontSize: 14, fontWeight: 600, color: sb.text }}>Kimi Code CLI 监控中心</div>
-              <span
-                title="非官方第三方工具"
-                style={{
-                  fontSize: 10,
-                  fontWeight: 500,
-                  color: theme === "dark" ? "#9ca3af" : "#6b7280",
-                  border: `1px solid ${theme === "dark" ? "rgba(255,255,255,0.12)" : "#e5e7eb"}`,
-                  borderRadius: 4,
-                  padding: "1px 5px",
-                  userSelect: "none"
-                }}
-              >
-                非官方
-              </span>
               <div style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
                 <div style={{ fontSize: 11, color: c.sidebarHeaderMuted, paddingTop: 2 }}>v0.1.0</div>
               </div>
