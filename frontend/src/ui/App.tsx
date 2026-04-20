@@ -11,6 +11,17 @@ type SessionItem = {
   wire_path?: string;
   created_at?: number | null;
   updated_at?: number | null;
+  has_error?: boolean;
+};
+
+type SessionSummary = {
+  session_id: string;
+  title?: string | null;
+  work_dir?: string | null;
+  duration_ms: number;
+  total_turns: number;
+  total_tokens: number;
+  has_error: boolean;
 };
 
 type SessionsResponse = {
@@ -180,6 +191,14 @@ function formatUnixSeconds(v?: number | null): string {
   return d.toLocaleString();
 }
 
+function formatDuration(ms: number): string {
+  if (ms < 60000) return `${Math.round(ms / 1000)}s`;
+  if (ms < 3600000) return `${Math.round(ms / 60000)}m`;
+  const h = Math.floor(ms / 3600000);
+  const m = Math.round((ms % 3600000) / 60000);
+  return `${h}h ${m}m`;
+}
+
 function getEventKind(msg: StreamMessage): string {
   if (msg.type !== "wire") return "meta";
   const evt = msg.event;
@@ -285,6 +304,16 @@ function getTextPartText(evt: Record<string, unknown> | undefined): string | und
   return asString(parsed.flat["message.payload.text"]) ?? asString(parsed.flat["payload.text"]);
 }
 
+function getTurnBeginText(evt: Record<string, unknown> | undefined): string | undefined {
+  if (!evt) return undefined;
+  const parsed = parseWireEvent(evt);
+  return (
+    asString(parsed.flat["message.payload.text"]) ??
+    asString(parsed.flat["payload.text"]) ??
+    asString(parsed.flat["text"])
+  );
+}
+
 function getToolCallSummary(evt: Record<string, unknown> | undefined): { id?: string; name?: string } {
   if (!evt) return {};
   const parsed = parseWireEvent(evt);
@@ -337,12 +366,9 @@ function maybeNotify(msg: StreamMessage) {
 
   if (msg.type !== "wire") return;
   const kind = getDetailedEventKind(msg);
-  const evt = msg.event;
 
   if (kind === "ApprovalRequest") {
     new window.Notification("Kimi CLI Monitor", { body: "收到新的操作确认请求" });
-  } else if (kind === "ToolResult" && eventHasError(evt)) {
-    new window.Notification("Kimi CLI Monitor", { body: "工具调用发生异常" });
   }
 }
 
@@ -918,6 +944,7 @@ function EventCard({ msg, theme }: { msg: StreamMessage; theme: Theme }) {
   const toolResult = msg.type === "wire" && effectiveKind === "ToolResult" ? getToolResultDetails(effectiveEvent) : undefined;
   const approvalReq = msg.type === "wire" && effectiveKind === "ApprovalRequest" ? getApprovalRequestDetails(effectiveEvent) : undefined;
   const tokenUsage = msg.type === "wire" && effectiveKind === "StatusUpdate" ? getTokenUsage(effectiveEvent) : undefined;
+  const turnBeginText = msg.type === "wire" && effectiveKind === "TurnBegin" ? getTurnBeginText(effectiveEvent) : undefined;
 
   return (
     <div
@@ -1030,6 +1057,10 @@ function EventCard({ msg, theme }: { msg: StreamMessage; theme: Theme }) {
           ) : textPartText !== undefined ? (
             <div style={{ flex: 1, minWidth: 0, fontSize: 13, lineHeight: 1.6, background: theme === "dark" ? "rgba(255,255,255,0.04)" : "#f8fafc", padding: 8, borderRadius: 6, border: `1px solid ${c.border}` }}>
               <span style={{ color: c.text, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{textPartText}</span>
+            </div>
+          ) : turnBeginText !== undefined ? (
+            <div style={{ flex: 1, minWidth: 0, fontSize: 13, lineHeight: 1.6, background: theme === "dark" ? "rgba(255,255,255,0.04)" : "#f8fafc", padding: 8, borderRadius: 6, border: `1px solid ${c.border}` }}>
+              <span style={{ color: c.text, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{turnBeginText}</span>
             </div>
           ) : thinkText !== undefined ? (
             <div style={{ flex: 1, minWidth: 0, fontSize: 13, lineHeight: 1.6, background: theme === "dark" ? "rgba(255,255,255,0.04)" : "#f8fafc", padding: 8, borderRadius: 6, border: `1px solid ${c.border}` }}>
@@ -1228,6 +1259,12 @@ export function App() {
   const [statistics, setStatistics] = useState<StatisticsResponse | null>(null);
   const [sseReconnectTrigger, setSseReconnectTrigger] = useState<number>(0);
 
+  // Session summary & error indicators
+  const [sessionSummary, setSessionSummary] = useState<SessionSummary | null>(null);
+  const [sessionsWithError, setSessionsWithError] = useState<Set<string>>(new Set());
+  const timelineRef = useRef<HTMLDivElement>(null);
+  const isAtBottomRef = useRef(true);
+
   // Trace playback mode
   const [isTraceMode, setIsTraceMode] = useState(false);
   const [traceEvents, setTraceEvents] = useState<StreamMessage[]>([]);
@@ -1316,11 +1353,27 @@ export function App() {
     const data = (await res.json()) as SessionsResponse;
     setShareDir(data.share_dir);
     setSessions(data.sessions);
+    const errorSet = new Set<string>();
+    for (const s of data.sessions) {
+      if (s.has_error) errorSet.add(s.session_id);
+    }
+    setSessionsWithError(errorSet);
     setSelectedSessionId((prev) => {
       if (!prev) return "";
       const stillExists = data.sessions.some((s) => s.session_id === prev);
       return stillExists ? prev : "";
     });
+  }
+
+  async function fetchSessionSummary(sessionId: string) {
+    try {
+      const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/summary`);
+      if (!res.ok) throw new Error(`summary http ${res.status}`);
+      const data = (await res.json()) as SessionSummary;
+      setSessionSummary(data);
+    } catch {
+      setSessionSummary(null);
+    }
   }
 
   function resetCurrentSessionEvents() {
@@ -1359,6 +1412,22 @@ export function App() {
     document.body.style.backgroundColor = c.bg;
     document.documentElement.style.backgroundColor = c.bg;
   }, [c.bg]);
+
+  useEffect(() => {
+    if (selectedSessionId) {
+      fetchSessionSummary(selectedSessionId);
+    } else {
+      setSessionSummary(null);
+    }
+  }, [selectedSessionId]);
+
+  useEffect(() => {
+    const el = timelineRef.current;
+    if (!el || isTraceMode) return;
+    if (isAtBottomRef.current) {
+      el.scrollTop = el.scrollHeight;
+    }
+  }, [events, isTraceMode]);
 
   useEffect(() => {
     Promise.all([refreshSessions(), fetchStatistics()]).catch((e) => setStatus(e instanceof Error ? e.message : String(e)));
@@ -1523,7 +1592,9 @@ export function App() {
   }
 
   function selectSession(sessionId: string) {
+    if (sessionId === selectedSessionId) return;
     setSelectedSessionId(sessionId);
+    resetCurrentSessionEvents();
     requestNotificationPermission();
     if (isTraceMode) {
       setTracePage(1);
@@ -1536,6 +1607,12 @@ export function App() {
     setSelectedSessionId("");
     resetCurrentSessionEvents();
     setStatus("请选择会话");
+  }
+
+  function handleTimelineScroll() {
+    const el = timelineRef.current;
+    if (!el) return;
+    isAtBottomRef.current = el.scrollTop + el.clientHeight >= el.scrollHeight - 10;
   }
 
   function toggleDir(dir: string) {
@@ -1666,7 +1743,9 @@ export function App() {
                             width: 6,
                             height: 6,
                             borderRadius: "50%",
-                            background: isSelected ? c.sidebarIndicator : c.sidebarIndicatorInactive,
+                            background: isSelected
+                              ? c.sidebarIndicator
+                              : c.sidebarIndicatorInactive,
                             flexShrink: 0
                           }}
                         />
@@ -1736,7 +1815,9 @@ export function App() {
                   width: 6,
                   height: 6,
                   borderRadius: "50%",
-                  background: isSelected ? c.sidebarIndicator : c.sidebarIndicatorInactive,
+                  background: isSelected
+                    ? c.sidebarIndicator
+                    : c.sidebarIndicatorInactive,
                   flexShrink: 0
                 }}
               />
@@ -2150,6 +2231,39 @@ export function App() {
           </div>
 
           <section style={{ ...panelStyle, marginTop: 0, flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+            {selectedSessionId && sessionSummary ? (
+              <div
+                style={{
+                  display: "flex",
+                  gap: 16,
+                  flexWrap: "wrap",
+                  padding: "10px 12px",
+                  marginBottom: 10,
+                  background: theme === "dark" ? "rgba(255,255,255,0.04)" : "#f8fafc",
+                  border: `1px solid ${c.border}`,
+                  borderRadius: 8
+                }}
+              >
+                <div>
+                  <div style={{ fontSize: 11, color: c.textMuted }}>运行时长</div>
+                  <div style={{ fontWeight: 600, fontSize: 13, color: c.text }}>{formatDuration(sessionSummary.duration_ms)}</div>
+                </div>
+                <div>
+                  <div style={{ fontSize: 11, color: c.textMuted }}>Turn 数</div>
+                  <div style={{ fontWeight: 600, fontSize: 13, color: c.text }}>{sessionSummary.total_turns}</div>
+                </div>
+                <div>
+                  <div style={{ fontSize: 11, color: c.textMuted }}>Token 数</div>
+                  <div style={{ fontWeight: 600, fontSize: 13, color: c.text }}>{sessionSummary.total_tokens}</div>
+                </div>
+                {sessionSummary.has_error ? (
+                  <div style={{ display: "flex", alignItems: "center", gap: 4, marginLeft: "auto" }}>
+                    <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#ef4444" }} />
+                    <span style={{ fontSize: 11, color: "#ef4444" }}>包含异常</span>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
             {!selectedSessionId ? (
               <div
                 style={{
@@ -2227,7 +2341,7 @@ export function App() {
                   </div>
                 </div>
 
-                <div style={timelinePanelStyle(c)}>
+                <div ref={timelineRef} onScroll={handleTimelineScroll} style={timelinePanelStyle(c)}>
                   {traceLoading ? (
                     <div style={{ padding: 16, color: c.textMuted }}>加载中...</div>
                   ) : filteredTraceEvents.length === 0 ? (
@@ -2324,7 +2438,7 @@ export function App() {
                   </div>
                 </div>
 
-                <div style={timelinePanelStyle(c)}>
+                <div ref={timelineRef} onScroll={handleTimelineScroll} style={timelinePanelStyle(c)}>
                   {filteredTimelineItems.length === 0 ? <div style={{ padding: 16, color: c.textMuted }}>当前会话暂无匹配事件</div> : null}
                   {pagedTimelineItems.map((e, idx) => (
                     <EventCard key={`${safeEventPage}-${idx}`} msg={e} theme={theme} />

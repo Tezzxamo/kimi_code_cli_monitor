@@ -40,6 +40,17 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _wire_has_error(path: Path) -> bool:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                if '"is_error": true' in line:
+                    return True
+    except Exception:
+        pass
+    return False
+
+
 @app.get("/api/health")
 def health() -> dict:
     return {"ok": True, "time": _now_iso()}
@@ -68,6 +79,7 @@ def list_sessions(
                 "wire_path": str(s.wire_path),
                 "created_at": session_dir_stat.st_ctime,
                 "updated_at": wire_mtime,
+                "has_error": _wire_has_error(s.wire_path) if s.wire_path.exists() else False,
             }
         )
     if work_dir_contains:
@@ -298,6 +310,81 @@ def get_statistics() -> JSONResponse:
     }
     _statistics_cache[cache_key] = (now, result)
     return JSONResponse(result)
+
+
+@app.get("/api/sessions/{session_id}/summary")
+def get_session_summary(session_id: str) -> JSONResponse:
+    """
+    返回单个会话的聚合摘要：时长、Turn 数、Token 数、是否包含异常。
+    """
+    settings = get_settings()
+    s = resolve_session(settings.kimi_share_dir, session_id)
+    if not s:
+        raise HTTPException(status_code=404, detail="session not found")
+
+    created = s.session_dir.stat().st_ctime
+    updated = s.wire_path.stat().st_mtime if s.wire_path.exists() else created
+    duration_ms = max(0, (updated - created)) * 1000 if updated and created else 0
+
+    total_turns = 0
+    total_tokens = 0
+    has_error = False
+
+    if s.wire_path.exists():
+        try:
+            with open(s.wire_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    if '"is_error": true' in line:
+                        has_error = True
+                    try:
+                        obj = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    msg = obj.get("message", {})
+                    msg_type = msg.get("type")
+                    payload = msg.get("payload", {}) or {}
+
+                    if msg_type == "TurnBegin":
+                        total_turns += 1
+                    nested = payload.get("event", {}) or {}
+                    if nested.get("type") == "TurnBegin":
+                        total_turns += 1
+
+                    if msg_type == "StatusUpdate":
+                        tu = payload.get("token_usage") or {}
+                        if tu:
+                            total_tokens += (
+                                tu.get("input_other", 0)
+                                + tu.get("input_cache_read", 0)
+                                + tu.get("input_cache_creation", 0)
+                                + tu.get("output", 0)
+                            )
+                    nested_payload = nested.get("payload", {}) or {}
+                    if "token_usage" in nested_payload:
+                        tu = nested_payload.get("token_usage") or {}
+                        if tu:
+                            total_tokens += (
+                                tu.get("input_other", 0)
+                                + tu.get("input_cache_read", 0)
+                                + tu.get("input_cache_creation", 0)
+                                + tu.get("output", 0)
+                            )
+        except Exception:
+            pass
+
+    return JSONResponse(
+        {
+            "session_id": session_id,
+            "title": read_state_title(s.state_path),
+            "work_dir": load_work_dir_map(settings.kimi_share_dir).get(s.work_dir_hash),
+            "duration_ms": int(duration_ms),
+            "total_turns": total_turns,
+            "total_tokens": total_tokens,
+            "has_error": has_error,
+        }
+    )
 
 
 @app.get("/api/trace")
