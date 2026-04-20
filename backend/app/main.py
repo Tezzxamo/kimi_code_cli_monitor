@@ -422,6 +422,44 @@ def get_trace(
     )
 
 
+@app.get("/api/sessions/{session_id}/context")
+def get_session_context(
+    session_id: str,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=500),
+) -> JSONResponse:
+    """
+    分页读取某个会话的 context.jsonl 内容。
+    """
+    settings = get_settings()
+    s = resolve_session(settings.kimi_share_dir, session_id)
+    if not s:
+        raise HTTPException(status_code=404, detail="session not found")
+
+    if not s.context_path.exists():
+        return JSONResponse({"session_id": session_id, "events": [], "pagination": {"page": 1, "page_size": page_size, "total": 0, "total_pages": 1}})
+
+    all_items, _ = read_jsonl_since(s.context_path, since_offset=0)
+    total = len(all_items)
+    start = (page - 1) * page_size
+    end = start + page_size
+    paged = all_items[start:end]
+
+    events = [{"type": "context", "time": _now_iso(), "event": obj} for obj in paged]
+    return JSONResponse(
+        {
+            "session_id": session_id,
+            "events": events,
+            "pagination": {
+                "page": page,
+                "page_size": page_size,
+                "total": total,
+                "total_pages": (total + page_size - 1) // page_size,
+            },
+        }
+    )
+
+
 @app.get("/api/stream")
 async def stream(
     session_id: str = Query(..., min_length=1),

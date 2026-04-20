@@ -1256,6 +1256,7 @@ export function App() {
   const [sidebarListMode, setSidebarListMode] = useState<"list" | "tree">("tree");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [currentView, setCurrentView] = useState<"monitor" | "statistics">("monitor");
+  const [sessionSortBy, setSessionSortBy] = useState<"updated_at" | "created_at" | "title" | "has_error">("updated_at");
   const [statistics, setStatistics] = useState<StatisticsResponse | null>(null);
   const [sseReconnectTrigger, setSseReconnectTrigger] = useState<number>(0);
 
@@ -1274,6 +1275,24 @@ export function App() {
   const [traceKeyword, setTraceKeyword] = useState("");
   const [traceLoading, setTraceLoading] = useState(false);
 
+  // Context view mode
+  const [isContextMode, setIsContextMode] = useState(false);
+  const [contextEvents, setContextEvents] = useState<StreamMessage[]>([]);
+  const [contextPage, setContextPage] = useState(1);
+  const [contextPageSize, setContextPageSize] = useState(50);
+  const [contextTotalPages, setContextTotalPages] = useState(1);
+  const [contextLoading, setContextLoading] = useState(false);
+
+  // Turn grouping view
+  const [isTurnView, setIsTurnView] = useState(false);
+  const [expandedTurns, setExpandedTurns] = useState<Set<number>>(new Set());
+
+  // Virtual scrolling
+  const [timelineScrollTop, setTimelineScrollTop] = useState(0);
+  const timelineContainerHeightRef = useRef(600);
+  const ITEM_ESTIMATE_HEIGHT = 80;
+  const OVERSCAN = 5;
+
   async function fetchStatistics() {
     try {
       const res = await fetch("/api/statistics");
@@ -1288,7 +1307,7 @@ export function App() {
   const latestEvent = events.length > 0 ? events[events.length - 1] : null;
   const connectedTone = statusTone(status);
   const filteredTimelineItems = useMemo(() => {
-    const timelineItems = events.slice(-300).reverse();
+    const timelineItems = events.slice(-2000).reverse();
     return timelineItems.filter((e) => {
       if (eventKindFilter) {
         const kind = getDetailedEventKind(e);
@@ -1306,15 +1325,90 @@ export function App() {
   const safeEventPage = Math.min(eventPage, totalEventPages);
   const pagedTimelineItems = filteredTimelineItems.slice((safeEventPage - 1) * eventPageSize, safeEventPage * eventPageSize);
 
+  // Turn grouping: group events by TurnBegin in chronological order, then reverse
+  type TurnGroup = { turnIndex: number; beginEvent?: StreamMessage; events: StreamMessage[] };
+  const turnGroups = useMemo(() => {
+    const groups: TurnGroup[] = [];
+    let current: TurnGroup | null = null;
+    let turnIdx = 0;
+    for (const e of events) {
+      const kind = e.type === "wire" ? getDetailedEventKind(e) : "";
+      if (kind === "TurnBegin") {
+        if (current) groups.push(current);
+        turnIdx++;
+        current = { turnIndex: turnIdx, beginEvent: e, events: [e] };
+      } else if (current) {
+        current.events.push(e);
+      } else {
+        if (groups.length === 0 || groups[groups.length - 1].turnIndex !== 0) {
+          groups.push({ turnIndex: 0, events: [e] });
+        } else {
+          groups[groups.length - 1].events.push(e);
+        }
+      }
+    }
+    if (current) groups.push(current);
+    return groups;
+  }, [events]);
+
+  const filteredTurnGroups = useMemo(() => {
+    let groups = [...turnGroups].reverse();
+    if (eventKindFilter) {
+      groups = groups.filter((g) => g.events.some((e) => getDetailedEventKind(e) === eventKindFilter));
+    }
+    if (eventErrorFilter !== "all") {
+      groups = groups.filter((g) =>
+        g.events.some((e) => {
+          const isErr = e.type === "wire" ? eventHasError(e.event) : false;
+          return eventErrorFilter === "error" ? isErr : !isErr;
+        })
+      );
+    }
+    return groups;
+  }, [turnGroups, eventKindFilter, eventErrorFilter]);
+
+  const totalTurnPages = Math.max(1, Math.ceil(filteredTurnGroups.length / eventPageSize));
+  const safeTurnPage = Math.min(eventPage, totalTurnPages);
+  const pagedTurnGroups = filteredTurnGroups.slice((safeTurnPage - 1) * eventPageSize, safeTurnPage * eventPageSize);
+
+  // Virtual scrolling range calculation
+  const virtualRange = useMemo(() => {
+    const items = isTurnView ? pagedTurnGroups : pagedTimelineItems;
+    const totalItems = items.length;
+    const containerHeight = timelineContainerHeightRef.current;
+    const startIndex = Math.max(0, Math.floor(timelineScrollTop / ITEM_ESTIMATE_HEIGHT) - OVERSCAN);
+    const endIndex = Math.min(totalItems, Math.ceil((timelineScrollTop + containerHeight) / ITEM_ESTIMATE_HEIGHT) + OVERSCAN);
+    const paddingTop = startIndex * ITEM_ESTIMATE_HEIGHT;
+    const paddingBottom = Math.max(0, (totalItems - endIndex) * ITEM_ESTIMATE_HEIGHT);
+    return { startIndex, endIndex, paddingTop, paddingBottom, totalItems };
+  }, [timelineScrollTop, isTurnView, pagedTimelineItems, pagedTurnGroups]);
+
   useEffect(() => {
     if (safeEventPage < eventPage) {
       setEventPage(safeEventPage);
     }
   }, [safeEventPage, eventPage]);
 
+  const sortedSessions = useMemo(() => {
+    const arr = [...sessions];
+    arr.sort((a, b) => {
+      switch (sessionSortBy) {
+        case "created_at":
+          return (b.created_at || 0) - (a.created_at || 0);
+        case "title":
+          return (a.title || "").localeCompare(b.title || "");
+        case "has_error":
+          return (b.has_error ? 1 : 0) - (a.has_error ? 1 : 0);
+        default:
+          return (b.updated_at || 0) - (a.updated_at || 0);
+      }
+    });
+    return arr;
+  }, [sessions, sessionSortBy]);
+
   const groupedSessions = useMemo(() => {
     const map = new Map<string, SessionItem[]>();
-    for (const s of sessions) {
+    for (const s of sortedSessions) {
       const dir = s.work_dir || s.work_dir_hash || "未知目录";
       if (!map.has(dir)) map.set(dir, []);
       map.get(dir)!.push(s);
@@ -1322,10 +1416,21 @@ export function App() {
     return Array.from(map.entries())
       .map(([dir, items]) => ({
         dir,
-        items: items.sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0))
+        items: items.sort((a, b) => {
+          switch (sessionSortBy) {
+            case "created_at":
+              return (b.created_at || 0) - (a.created_at || 0);
+            case "title":
+              return (a.title || "").localeCompare(b.title || "");
+            case "has_error":
+              return (b.has_error ? 1 : 0) - (a.has_error ? 1 : 0);
+            default:
+              return (b.updated_at || 0) - (a.updated_at || 0);
+          }
+        })
       }))
       .sort((a, b) => a.dir.localeCompare(b.dir));
-  }, [sessions]);
+  }, [sortedSessions, sessionSortBy]);
 
   const filteredGroups = useMemo(() => {
     const q = sidebarSearch.trim().toLowerCase();
@@ -1457,7 +1562,16 @@ export function App() {
     setStatus("连接中...");
     let es: EventSource | null = null;
     let reconnectTimer = 0;
+    let heartbeatTimer = 0;
     let isCleanClose = false;
+    let reconnectAttempts = 0;
+    let lastMessageTime = Date.now();
+
+    function getReconnectDelay() {
+      const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
+      reconnectAttempts++;
+      return delay;
+    }
 
     function connect() {
       if (es) {
@@ -1472,10 +1586,13 @@ export function App() {
       es = new EventSource(`/api/stream?${qs.toString()}`);
 
       es.onopen = () => {
+        reconnectAttempts = 0;
+        lastMessageTime = Date.now();
         setStatus("已连接（SSE）");
       };
 
       es.onmessage = (e) => {
+        lastMessageTime = Date.now();
         try {
           const data = JSON.parse(e.data) as StreamMessage & { next_offset?: number };
           if (data.type === "wire") {
@@ -1495,7 +1612,7 @@ export function App() {
       };
 
       es.onerror = () => {
-        setStatus("连接异常（尝试重连）");
+        setStatus(`连接异常（${reconnectAttempts + 1} 次重连）`);
         if (es) {
           es.close();
           es = null;
@@ -1503,10 +1620,22 @@ export function App() {
         if (!isCleanClose) {
           reconnectTimer = window.setTimeout(() => {
             connect();
-          }, 3000);
+          }, getReconnectDelay());
         }
       };
     }
+
+    // Heartbeat: if no message for 15s while OPEN, force reconnect
+    heartbeatTimer = window.setInterval(() => {
+      if (es && es.readyState === EventSource.OPEN && Date.now() - lastMessageTime > 15000) {
+        setStatus("连接静默（强制重连）");
+        if (es) {
+          es.close();
+          es = null;
+        }
+        connect();
+      }
+    }, 5000);
 
     fetchEventsOnce(selectedSessionId)
       .then(() => connect())
@@ -1518,6 +1647,7 @@ export function App() {
     return () => {
       isCleanClose = true;
       window.clearTimeout(reconnectTimer);
+      window.clearInterval(heartbeatTimer);
       if (es) {
         es.close();
         es = null;
@@ -1585,6 +1715,43 @@ export function App() {
     setTracePage(1);
   }
 
+  async function loadContextPage(sessionId: string, page: number, pageSize: number) {
+    setContextLoading(true);
+    try {
+      const qs = new URLSearchParams({
+        page: String(page),
+        page_size: String(pageSize)
+      });
+      const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/context?${qs.toString()}`);
+      if (!res.ok) throw new Error(`context http ${res.status}`);
+      const data = (await res.json()) as {
+        events: StreamMessage[];
+        pagination: { page: number; page_size: number; total: number; total_pages: number };
+      };
+      setContextEvents(data.events);
+      setContextPage(data.pagination.page);
+      setContextPageSize(data.pagination.page_size);
+      setContextTotalPages(data.pagination.total_pages);
+    } catch (e) {
+      setStatus(e instanceof Error ? e.message : String(e));
+    } finally {
+      setContextLoading(false);
+    }
+  }
+
+  function enterContextMode() {
+    if (!selectedSessionId) return;
+    setIsContextMode(true);
+    setContextPage(1);
+    loadContextPage(selectedSessionId, 1, contextPageSize || 50);
+  }
+
+  function exitContextMode() {
+    setIsContextMode(false);
+    setContextEvents([]);
+    setContextPage(1);
+  }
+
   async function handleReconnect() {
     if (!selectedSessionId) return;
     resetCurrentSessionEvents();
@@ -1601,6 +1768,10 @@ export function App() {
       setTraceKeyword("");
       loadTracePage(sessionId, 1, tracePageSize || 100);
     }
+    if (isContextMode) {
+      setContextPage(1);
+      loadContextPage(sessionId, 1, contextPageSize || 50);
+    }
   }
 
   function deselectSession() {
@@ -1613,6 +1784,8 @@ export function App() {
     const el = timelineRef.current;
     if (!el) return;
     isAtBottomRef.current = el.scrollTop + el.clientHeight >= el.scrollHeight - 10;
+    setTimelineScrollTop(el.scrollTop);
+    timelineContainerHeightRef.current = el.clientHeight;
   }
 
   function toggleDir(dir: string) {
@@ -1768,7 +1941,7 @@ export function App() {
   }
 
   function renderSidebarList() {
-    const filtered = sessions.filter((s) => {
+    const filtered = sortedSessions.filter((s) => {
       const q = sidebarSearch.trim().toLowerCase();
       if (!q) return true;
       return (
@@ -2116,6 +2289,26 @@ export function App() {
                   outline: "none"
                 }}
               />
+              <select
+                value={sessionSortBy}
+                onChange={(e) => setSessionSortBy(e.target.value as typeof sessionSortBy)}
+                style={{
+                  background: sb.inputBg,
+                  border: `1px solid ${sb.inputBorder}`,
+                  borderRadius: 8,
+                  padding: "7px 8px",
+                  color: sb.text,
+                  fontSize: 12,
+                  outline: "none",
+                  cursor: "pointer"
+                }}
+                title="排序方式"
+              >
+                <option value="updated_at">更新时间</option>
+                <option value="created_at">创建时间</option>
+                <option value="title">标题</option>
+                <option value="has_error">异常优先</option>
+              </select>
             </div>
 
             <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
@@ -2201,7 +2394,7 @@ export function App() {
               <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
                 <div>
                   <div style={{ fontWeight: 700, fontSize: 15, color: c.text }}>
-                    {isTraceMode ? "历史事件回放" : "实时事件监控"}
+                    {isTraceMode ? "历史事件回放" : isContextMode ? "上下文快照" : "实时事件监控"}
                   </div>
                   <div style={{ marginTop: 2, color: c.textMuted, fontSize: 12 }}>
                     会话：{renderTruncatedCode(selectedSessionId || "-", 360)}
@@ -2211,7 +2404,7 @@ export function App() {
               </div>
             </div>
             <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-              {!isTraceMode ? (
+              {!isTraceMode && !isContextMode ? (
                 <>
                   <StatPill title="状态" value={status} tone={connectedTone} theme={theme} />
                   <StatPill title="事件数" value={String(events.length)} theme={theme} />
@@ -2221,9 +2414,16 @@ export function App() {
                   <button style={btnGhostStyle} onClick={enterTraceMode} disabled={!selectedSessionId}>
                     历史回放
                   </button>
+                  <button style={btnGhostStyle} onClick={enterContextMode} disabled={!selectedSessionId}>
+                    上下文
+                  </button>
                 </>
-              ) : (
+              ) : isTraceMode ? (
                 <button style={btnGhostStyle} onClick={exitTraceMode}>
+                  返回实时监控
+                </button>
+              ) : (
+                <button style={btnGhostStyle} onClick={exitContextMode}>
                   返回实时监控
                 </button>
               )}
@@ -2353,6 +2553,71 @@ export function App() {
                   )}
                 </div>
               </>
+            ) : isContextMode ? (
+              <>
+                <div style={toolbarRowStyle(c)}>
+                  <div style={filtersStyle}>
+                    <label style={fieldLabelStyle(c)}>
+                      每页
+                      <select
+                        style={{ ...inputStyle, minWidth: 88 }}
+                        value={contextPageSize}
+                        onChange={(e) => {
+                          const nextSize = Number(e.target.value);
+                          setContextPageSize(nextSize);
+                          setContextPage(1);
+                          loadContextPage(selectedSessionId, 1, nextSize);
+                        }}
+                      >
+                        {[10, 20, 50, 100].map((n) => (
+                          <option key={n} value={n}>
+                            {n}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <button
+                      style={btnGhostStyle}
+                      onClick={() => {
+                        const next = Math.max(1, contextPage - 1);
+                        setContextPage(next);
+                        loadContextPage(selectedSessionId, next, contextPageSize);
+                      }}
+                      disabled={contextPage <= 1}
+                    >
+                      上一页
+                    </button>
+                    <span style={{ color: c.textSecondary, fontSize: 13 }}>
+                      第 <b>{contextPage}</b> / {contextTotalPages} 页
+                    </span>
+                    <button
+                      style={btnGhostStyle}
+                      onClick={() => {
+                        const next = Math.min(contextTotalPages, contextPage + 1);
+                        setContextPage(next);
+                        loadContextPage(selectedSessionId, next, contextPageSize);
+                      }}
+                      disabled={contextPage >= contextTotalPages}
+                    >
+                      下一页
+                    </button>
+                    <button style={btnGhostStyle} onClick={() => loadContextPage(selectedSessionId, contextPage, contextPageSize)} disabled={contextLoading}>
+                      {contextLoading ? "加载中..." : "刷新"}
+                    </button>
+                  </div>
+                </div>
+                <div style={timelinePanelStyle(c)}>
+                  {contextLoading ? (
+                    <div style={{ padding: 16, color: c.textMuted }}>加载中...</div>
+                  ) : contextEvents.length === 0 ? (
+                    <div style={{ padding: 16, color: c.textMuted }}>当前会话暂无上下文数据</div>
+                  ) : (
+                    contextEvents.map((e, idx) => (
+                      <EventCard key={`ctx-${contextPage}-${idx}`} msg={e} theme={theme} />
+                    ))
+                  )}
+                </div>
+              </>
             ) : (
               <>
                 <div style={toolbarRowStyle(c)}>
@@ -2421,28 +2686,86 @@ export function App() {
                         <option value="error">异常</option>
                       </select>
                     </label>
-                    <button style={btnGhostStyle} onClick={() => setEventPage((p) => Math.max(1, p - 1))} disabled={safeEventPage <= 1}>
+                    <button style={btnGhostStyle} onClick={() => setEventPage((p) => Math.max(1, p - 1))} disabled={isTurnView ? safeTurnPage <= 1 : safeEventPage <= 1}>
                       上一页
                     </button>
                     <span style={{ color: c.textSecondary, fontSize: 13 }}>
-                      第 <b>{safeEventPage}</b> / {totalEventPages} 页，共 {filteredTimelineItems.length} 条
+                      {isTurnView
+                        ? <>第 <b>{safeTurnPage}</b> / {totalTurnPages} 页，共 {filteredTurnGroups.length} 个 Turn</>
+                        : <>第 <b>{safeEventPage}</b> / {totalEventPages} 页，共 {filteredTimelineItems.length} 条</>}
                     </span>
                     <button
                       style={btnGhostStyle}
-                      onClick={() => setEventPage((p) => Math.min(totalEventPages, p + 1))}
-                      disabled={safeEventPage >= totalEventPages}
+                      onClick={() => setEventPage((p) => Math.min(isTurnView ? totalTurnPages : totalEventPages, p + 1))}
+                      disabled={isTurnView ? safeTurnPage >= totalTurnPages : safeEventPage >= totalEventPages}
                     >
                       下一页
                     </button>
                     <button style={btnGhostStyle} onClick={() => resetCurrentSessionEvents()}>清空</button>
+                    <button
+                      style={{
+                        ...btnGhostStyle,
+                        borderColor: isTurnView ? c.btnPrimaryBorder : c.btnGhostBorder,
+                        color: isTurnView ? c.btnPrimaryText : c.btnGhostText,
+                        background: isTurnView ? c.btnPrimaryBg : c.btnGhostBg
+                      }}
+                      onClick={() => { setIsTurnView((v) => !v); setEventPage(1); }}
+                    >
+                      {isTurnView ? "列表视图" : "Turn 视图"}
+                    </button>
                   </div>
                 </div>
 
                 <div ref={timelineRef} onScroll={handleTimelineScroll} style={timelinePanelStyle(c)}>
-                  {filteredTimelineItems.length === 0 ? <div style={{ padding: 16, color: c.textMuted }}>当前会话暂无匹配事件</div> : null}
-                  {pagedTimelineItems.map((e, idx) => (
-                    <EventCard key={`${safeEventPage}-${idx}`} msg={e} theme={theme} />
-                  ))}
+                  {filteredTimelineItems.length === 0 && !isTurnView ? <div style={{ padding: 16, color: c.textMuted }}>当前会话暂无匹配事件</div> : null}
+                  {isTurnView && filteredTurnGroups.length === 0 ? <div style={{ padding: 16, color: c.textMuted }}>当前会话暂无匹配 Turn</div> : null}
+                  <div style={{ paddingTop: virtualRange.paddingTop, paddingBottom: virtualRange.paddingBottom }}>
+                    {(isTurnView ? pagedTurnGroups : pagedTimelineItems)
+                      .slice(virtualRange.startIndex, virtualRange.endIndex)
+                      .map((e, idx) => {
+                        const realIndex = virtualRange.startIndex + idx;
+                        if (isTurnView) {
+                          const g = e as TurnGroup;
+                          const isExpanded = expandedTurns.has(g.turnIndex);
+                          const turnText = g.turnIndex > 0 ? `Turn ${g.turnIndex}` : "未分组事件";
+                          const toolCount = g.events.filter((ev) => getDetailedEventKind(ev) === "ToolCall").length;
+                          return (
+                            <div key={g.turnIndex} style={{ borderBottom: `1px solid ${c.timelineBorder}` }}>
+                              <div
+                                onClick={() => {
+                                  setExpandedTurns((prev) => {
+                                    const next = new Set(prev);
+                                    if (next.has(g.turnIndex)) next.delete(g.turnIndex);
+                                    else next.add(g.turnIndex);
+                                    return next;
+                                  });
+                                }}
+                                style={{
+                                  padding: "10px 12px",
+                                  cursor: "pointer",
+                                  display: "flex",
+                                  alignItems: "center",
+                                  gap: 10,
+                                  background: g.turnIndex > 0 ? (theme === "dark" ? "rgba(59,130,246,0.08)" : "#eff6ff") : "transparent"
+                                }}
+                              >
+                                <span style={{ fontSize: 12, userSelect: "none", color: c.textMuted }}>{isExpanded ? "▼" : "▶"}</span>
+                                <span style={{ fontWeight: 600, fontSize: 14, color: c.text }}>{turnText}</span>
+                                <span style={{ fontSize: 12, color: c.textMuted }}>({g.events.length} 事件{toolCount > 0 ? `, ${toolCount} 工具调用` : ""})</span>
+                              </div>
+                              {isExpanded ? (
+                                <div>
+                                  {g.events.map((ev, eidx) => (
+                                    <EventCard key={`turn-${g.turnIndex}-${eidx}`} msg={ev} theme={theme} />
+                                  ))}
+                                </div>
+                              ) : null}
+                            </div>
+                          );
+                        }
+                        return <EventCard key={`${safeEventPage}-${realIndex}`} msg={e as StreamMessage} theme={theme} />;
+                      })}
+                  </div>
                 </div>
               </>
             )}
