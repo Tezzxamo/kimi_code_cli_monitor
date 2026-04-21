@@ -924,6 +924,34 @@ function TokenBar({ label, value, total, color, bg, labelColor }: { label: strin
   );
 }
 
+function CollapsibleText({ text, theme, colors }: { text: string; theme: Theme; colors: typeof COLORS.light }) {
+  const [expanded, setExpanded] = useState(false);
+  const lines = text.split("\n");
+  const needsCollapse = lines.length > 3;
+  const display = expanded ? text : lines.slice(0, 3).join("\n");
+  return (
+    <div style={{ flex: 1, minWidth: 0, fontSize: 13, lineHeight: 1.6, background: theme === "dark" ? "rgba(255,255,255,0.04)" : "#f8fafc", padding: 8, borderRadius: 6, border: `1px solid ${colors.border}` }}>
+      <span style={{ color: colors.text, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{display}</span>
+      {needsCollapse ? (
+        <button
+          onClick={(e) => { e.stopPropagation(); setExpanded((v) => !v); }}
+          style={{
+            marginLeft: 8,
+            fontSize: 12,
+            color: colors.textMuted,
+            background: "transparent",
+            border: "none",
+            cursor: "pointer",
+            padding: 0
+          }}
+        >
+          {expanded ? "收起" : "展开"}
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
 function EventCard({ msg, theme }: { msg: StreamMessage; theme: Theme }) {
   const c = COLORS[theme];
   const kind = getDetailedEventKind(msg);
@@ -1055,17 +1083,11 @@ function EventCard({ msg, theme }: { msg: StreamMessage; theme: Theme }) {
               );
             })()
           ) : textPartText !== undefined ? (
-            <div style={{ flex: 1, minWidth: 0, fontSize: 13, lineHeight: 1.6, background: theme === "dark" ? "rgba(255,255,255,0.04)" : "#f8fafc", padding: 8, borderRadius: 6, border: `1px solid ${c.border}` }}>
-              <span style={{ color: c.text, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{textPartText}</span>
-            </div>
+            <CollapsibleText text={textPartText} theme={theme} colors={c} />
           ) : turnBeginText !== undefined ? (
-            <div style={{ flex: 1, minWidth: 0, fontSize: 13, lineHeight: 1.6, background: theme === "dark" ? "rgba(255,255,255,0.04)" : "#f8fafc", padding: 8, borderRadius: 6, border: `1px solid ${c.border}` }}>
-              <span style={{ color: c.text, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{turnBeginText}</span>
-            </div>
+            <CollapsibleText text={turnBeginText} theme={theme} colors={c} />
           ) : thinkText !== undefined ? (
-            <div style={{ flex: 1, minWidth: 0, fontSize: 13, lineHeight: 1.6, background: theme === "dark" ? "rgba(255,255,255,0.04)" : "#f8fafc", padding: 8, borderRadius: 6, border: `1px solid ${c.border}` }}>
-              <span style={{ color: c.text, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{thinkText}</span>
-            </div>
+            <CollapsibleText text={thinkText} theme={theme} colors={c} />
           ) : toolCall && (toolCall.id || toolCall.name) ? (
             <div style={{ flex: 1, minWidth: 0, fontSize: 13, lineHeight: 1.6, display: "flex", flexDirection: "column", gap: 6 }}>
               <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
