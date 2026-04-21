@@ -1271,6 +1271,8 @@ export function App() {
   const [eventPageSize, setEventPageSize] = useState<number>(20);
   const [eventKindFilter, setEventKindFilter] = useState<string>("");
   const [eventErrorFilter, setEventErrorFilter] = useState<"all" | "error" | "normal">("all");
+  const [eventKeywordFilter, setEventKeywordFilter] = useState<string>("");
+  const [autoScrollLocked, setAutoScrollLocked] = useState<boolean>(true);
   const eventOffsetRef = useRef<number>(0);
 
   const [sidebarSearch, setSidebarSearch] = useState<string>("");
@@ -1286,7 +1288,6 @@ export function App() {
   const [sessionSummary, setSessionSummary] = useState<SessionSummary | null>(null);
   const [sessionsWithError, setSessionsWithError] = useState<Set<string>>(new Set());
   const timelineRef = useRef<HTMLDivElement>(null);
-  const isAtBottomRef = useRef(true);
 
   // Trace playback mode
   const [isTraceMode, setIsTraceMode] = useState(false);
@@ -1340,9 +1341,23 @@ export function App() {
         if (eventErrorFilter === "error" && !isErr) return false;
         if (eventErrorFilter === "normal" && isErr) return false;
       }
+      if (eventKeywordFilter.trim()) {
+        const q = eventKeywordFilter.trim().toLowerCase();
+        const kind = getDetailedEventKind(e);
+        if (kind.toLowerCase().includes(q)) return true;
+        if (e.type === "wire") {
+          try {
+            const text = JSON.stringify(e.event).toLowerCase();
+            if (text.includes(q)) return true;
+          } catch {
+            return false;
+          }
+        }
+        return false;
+      }
       return true;
     });
-  }, [events, eventKindFilter, eventErrorFilter]);
+  }, [events, eventKindFilter, eventErrorFilter, eventKeywordFilter]);
   const totalEventPages = Math.max(1, Math.ceil(filteredTimelineItems.length / eventPageSize));
   const safeEventPage = Math.min(eventPage, totalEventPages);
   const pagedTimelineItems = filteredTimelineItems.slice((safeEventPage - 1) * eventPageSize, safeEventPage * eventPageSize);
@@ -1386,8 +1401,26 @@ export function App() {
         })
       );
     }
+    if (eventKeywordFilter.trim()) {
+      const q = eventKeywordFilter.trim().toLowerCase();
+      groups = groups.filter((g) =>
+        g.events.some((e) => {
+          const kind = getDetailedEventKind(e);
+          if (kind.toLowerCase().includes(q)) return true;
+          if (e.type === "wire") {
+            try {
+              const text = JSON.stringify(e.event).toLowerCase();
+              return text.includes(q);
+            } catch {
+              return false;
+            }
+          }
+          return false;
+        })
+      );
+    }
     return groups;
-  }, [turnGroups, eventKindFilter, eventErrorFilter]);
+  }, [turnGroups, eventKindFilter, eventErrorFilter, eventKeywordFilter]);
 
   const totalTurnPages = Math.max(1, Math.ceil(filteredTurnGroups.length / eventPageSize));
   const safeTurnPage = Math.min(eventPage, totalTurnPages);
@@ -1550,11 +1583,9 @@ export function App() {
 
   useEffect(() => {
     const el = timelineRef.current;
-    if (!el || isTraceMode) return;
-    if (isAtBottomRef.current) {
-      el.scrollTop = el.scrollHeight;
-    }
-  }, [events, isTraceMode]);
+    if (!el || isTraceMode || !autoScrollLocked) return;
+    el.scrollTop = el.scrollHeight;
+  }, [events, isTraceMode, autoScrollLocked]);
 
   useEffect(() => {
     Promise.all([refreshSessions(), fetchStatistics()]).catch((e) => setStatus(e instanceof Error ? e.message : String(e)));
@@ -1805,7 +1836,13 @@ export function App() {
   function handleTimelineScroll() {
     const el = timelineRef.current;
     if (!el) return;
-    isAtBottomRef.current = el.scrollTop + el.clientHeight >= el.scrollHeight - 10;
+    const isNearBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 10;
+    if (!isNearBottom && autoScrollLocked) {
+      setAutoScrollLocked(false);
+    }
+    if (isNearBottom && !autoScrollLocked) {
+      setAutoScrollLocked(true);
+    }
     setTimelineScrollTop(el.scrollTop);
     timelineContainerHeightRef.current = el.clientHeight;
   }
@@ -2708,6 +2745,25 @@ export function App() {
                         <option value="error">异常</option>
                       </select>
                     </label>
+                    <input
+                      type="text"
+                      placeholder="搜索事件内容..."
+                      value={eventKeywordFilter}
+                      onChange={(e) => { setEventKeywordFilter(e.target.value); setEventPage(1); }}
+                      style={{ ...inputStyle, minWidth: 160, fontSize: 13 }}
+                    />
+                    <button
+                      style={{
+                        ...btnGhostStyle,
+                        borderColor: autoScrollLocked ? c.btnPrimaryBorder : c.btnGhostBorder,
+                        color: autoScrollLocked ? c.btnPrimaryText : c.btnGhostText,
+                        background: autoScrollLocked ? c.btnPrimaryBg : c.btnGhostBg
+                      }}
+                      onClick={() => setAutoScrollLocked((v) => !v)}
+                      title={autoScrollLocked ? "新事件到达时自动滚动到底部" : "已暂停自动滚动"}
+                    >
+                      {autoScrollLocked ? "🔒 底部锁定" : "⏸ 滚动暂停"}
+                    </button>
                     <button style={btnGhostStyle} onClick={() => setEventPage((p) => Math.max(1, p - 1))} disabled={isTurnView ? safeTurnPage <= 1 : safeEventPage <= 1}>
                       上一页
                     </button>
