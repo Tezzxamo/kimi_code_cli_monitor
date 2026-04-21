@@ -431,6 +431,15 @@ function getTokenUsage(evt: Record<string, unknown> | undefined): { input_cache_
   };
 }
 
+function valuesInclude(obj: unknown, q: string): boolean {
+  if (obj === null || obj === undefined) return false;
+  if (typeof obj === "string") return obj.toLowerCase().includes(q);
+  if (typeof obj === "number" || typeof obj === "boolean") return String(obj).toLowerCase().includes(q);
+  if (Array.isArray(obj)) return obj.some((v) => valuesInclude(v, q));
+  if (typeof obj === "object") return Object.values(obj as Record<string, unknown>).some((v) => valuesInclude(v, q));
+  return false;
+}
+
 function EventTreeNode({
   label,
   data,
@@ -1345,14 +1354,7 @@ export function App() {
         const q = eventKeywordFilter.trim().toLowerCase();
         const kind = getDetailedEventKind(e);
         if (kind.toLowerCase().includes(q)) return true;
-        if (e.type === "wire") {
-          try {
-            const text = JSON.stringify(e.event).toLowerCase();
-            if (text.includes(q)) return true;
-          } catch {
-            return false;
-          }
-        }
+        if (e.type === "wire" && valuesInclude(e.event, q)) return true;
         return false;
       }
       return true;
@@ -1407,15 +1409,7 @@ export function App() {
         g.events.some((e) => {
           const kind = getDetailedEventKind(e);
           if (kind.toLowerCase().includes(q)) return true;
-          if (e.type === "wire") {
-            try {
-              const text = JSON.stringify(e.event).toLowerCase();
-              return text.includes(q);
-            } catch {
-              return false;
-            }
-          }
-          return false;
+          return e.type === "wire" && valuesInclude(e.event, q);
         })
       );
     }
@@ -1584,7 +1578,8 @@ export function App() {
   useEffect(() => {
     const el = timelineRef.current;
     if (!el || isTraceMode || !autoScrollLocked) return;
-    el.scrollTop = el.scrollHeight;
+    // List is reversed (newest first), so scroll to top to show latest events
+    el.scrollTop = 0;
   }, [events, isTraceMode, autoScrollLocked]);
 
   useEffect(() => {
@@ -1836,11 +1831,12 @@ export function App() {
   function handleTimelineScroll() {
     const el = timelineRef.current;
     if (!el) return;
-    const isNearBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 10;
-    if (!isNearBottom && autoScrollLocked) {
+    // List is reversed (newest at top), so "lock" means staying near the top
+    const isNearTop = el.scrollTop <= 50;
+    if (!isNearTop && autoScrollLocked) {
       setAutoScrollLocked(false);
     }
-    if (isNearBottom && !autoScrollLocked) {
+    if (isNearTop && !autoScrollLocked) {
       setAutoScrollLocked(true);
     }
     setTimelineScrollTop(el.scrollTop);
