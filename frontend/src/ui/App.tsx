@@ -1281,7 +1281,6 @@ export function App() {
   const [eventKindFilter, setEventKindFilter] = useState<string>("");
   const [eventErrorFilter, setEventErrorFilter] = useState<"all" | "error" | "normal">("all");
   const [eventKeywordFilter, setEventKeywordFilter] = useState<string>("");
-  const [autoScrollLocked, setAutoScrollLocked] = useState<boolean>(true);
   const eventOffsetRef = useRef<number>(0);
 
   const [sidebarSearch, setSidebarSearch] = useState<string>("");
@@ -1577,10 +1576,10 @@ export function App() {
 
   useEffect(() => {
     const el = timelineRef.current;
-    if (!el || isTraceMode || !autoScrollLocked) return;
+    if (!el || isTraceMode) return;
     // List is reversed (newest first), so scroll to top to show latest events
     el.scrollTop = 0;
-  }, [events, isTraceMode, autoScrollLocked]);
+  }, [events, isTraceMode]);
 
   useEffect(() => {
     Promise.all([refreshSessions(), fetchStatistics()]).catch((e) => setStatus(e instanceof Error ? e.message : String(e)));
@@ -1831,14 +1830,6 @@ export function App() {
   function handleTimelineScroll() {
     const el = timelineRef.current;
     if (!el) return;
-    // List is reversed (newest at top), so "lock" means staying near the top
-    const isNearTop = el.scrollTop <= 50;
-    if (!isNearTop && autoScrollLocked) {
-      setAutoScrollLocked(false);
-    }
-    if (isNearTop && !autoScrollLocked) {
-      setAutoScrollLocked(true);
-    }
     setTimelineScrollTop(el.scrollTop);
     timelineContainerHeightRef.current = el.clientHeight;
   }
@@ -2748,18 +2739,6 @@ export function App() {
                       onChange={(e) => { setEventKeywordFilter(e.target.value); setEventPage(1); }}
                       style={{ ...inputStyle, minWidth: 160, fontSize: 13 }}
                     />
-                    <button
-                      style={{
-                        ...btnGhostStyle,
-                        borderColor: autoScrollLocked ? c.btnPrimaryBorder : c.btnGhostBorder,
-                        color: autoScrollLocked ? c.btnPrimaryText : c.btnGhostText,
-                        background: autoScrollLocked ? c.btnPrimaryBg : c.btnGhostBg
-                      }}
-                      onClick={() => setAutoScrollLocked((v) => !v)}
-                      title={autoScrollLocked ? "新事件到达时自动滚动到底部" : "已暂停自动滚动"}
-                    >
-                      {autoScrollLocked ? "🔒 底部锁定" : "⏸ 滚动暂停"}
-                    </button>
                     <button style={btnGhostStyle} onClick={() => setEventPage((p) => Math.max(1, p - 1))} disabled={isTurnView ? safeTurnPage <= 1 : safeEventPage <= 1}>
                       上一页
                     </button>
