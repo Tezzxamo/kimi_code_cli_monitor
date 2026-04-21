@@ -83,6 +83,7 @@ Kimi Code CLI 在运行时会将会话事件写入本地 `~/.kimi/sessions/**/wi
 - [x] 全局统计面板（总览、近 30 日趋势、工具调用、项目排行）
 - [x] 提供前后端一键同时启动脚本 `start-all.ps1`
 - [x] 更新全部项目文档（README、AGENTS、docs 交叉引用）
+- [x] Session 列表右键菜单：重命名（修改 `state.json` 标题）、删除（移除会话目录）
 
 ---
 
@@ -104,8 +105,17 @@ Kimi Code CLI 在运行时会将会话事件写入本地 `~/.kimi/sessions/**/wi
 ├── frontend/         # Web 前端
 │   ├── src/
 │   │   ├── main.tsx          # React 应用挂载点
+│   │   ├── types/            # TypeScript 类型定义
+│   │   ├── hooks/            # 自定义 React Hooks
+│   │   ├── utils/            # 工具函数
+│   │   ├── components/       # UI 组件
+│   │   │   ├── Sidebar.tsx         # 会话侧边栏（树状/列表、搜索、右键菜单）
+│   │   │   ├── EventCard.tsx       # 单条事件卡片
+│   │   │   ├── EventTreeNode.tsx   # 事件 JSON 树形展示
+│   │   │   ├── StatisticsPanel.tsx # 统计面板
+│   │   │   └── ...
 │   │   └── ui/
-│   │       └── App.tsx       # 全部 UI 逻辑（含主题、会话树、事件时间线）
+│   │       └── App.tsx       # 主应用逻辑（路由、状态、SSE 连接）
 │   ├── index.html
 │   ├── package.json
 │   ├── vite.config.ts        # Vite 配置（含 /api 代理）
@@ -204,6 +214,8 @@ npm run build
 |------|------|
 | `GET /api/health` | 健康检查 |
 | `GET /api/sessions?page=1&page_size=10&work_dir_contains=xxx` | 会话列表（分页 + 工作目录过滤） |
+| `PUT /api/sessions/{session_id}` | 重命名会话（Body: `{"title": "..."}`） |
+| `DELETE /api/sessions/{session_id}` | 删除会话及目录 |
 | `GET /api/work-dirs?limit=200` | 工作目录聚合统计 |
 | `GET /api/statistics` | 全量统计摘要（会话/Turn/Token/工具/项目 Top 20） |
 | `GET /api/stream?session_id=<id>&poll_interval_s=1&since_offset=0` | **SSE** 流式推送 `wire.jsonl` 增量事件 |
@@ -236,12 +248,17 @@ npm run build
 - **`src/main.tsx`**
   - React 根组件挂载，引入 `React.StrictMode`。
 - **`src/ui/App.tsx`**
-  - 单文件承载全部 UI：
-    - 侧边栏（会话树/列表模式、搜索、折叠、主题切换）；
+  - 主应用容器：
+    - 全局状态管理（sessions、events、SSE 连接、分页过滤）；
     - 主内容区（事件时间线、JSON 详情、分页、状态栏）；
     - 统计视图（总览卡片、近 30 日折线图、工具调用、项目排行）；
     - 轮询逻辑（`/api/events` 每 5 秒拉取，`/api/statistics` 每 30 秒拉取）；
     - 浅色/深色主题持久化到 `localStorage`。
+- **`src/components/Sidebar.tsx`**
+  - 会话侧边栏：
+    - 树状/列表视图切换、搜索过滤、排序、目录折叠；
+    - 右键上下文菜单（重命名、删除）；
+    - 内联标题编辑（Enter 确认 / Escape 取消）。
 
 ---
 

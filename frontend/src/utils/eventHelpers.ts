@@ -163,18 +163,38 @@ export function getToolCallArgs(evt: Record<string, unknown> | undefined): strin
   }
 }
 
-export function getToolResultDetails(evt: Record<string, unknown> | undefined): { tool_call_id?: string; return_value?: string; is_error?: boolean } {
+export function getToolCallPartDetails(evt: Record<string, unknown> | undefined): { arguments_part?: string } {
+  if (!evt) return {};
+  const parsed = parseWireEvent(evt);
+  return {
+    arguments_part: asString(parsed.flat["message.payload.arguments_part"]) ?? asString(parsed.flat["payload.arguments_part"])
+  };
+}
+
+export function getToolResultDetails(evt: Record<string, unknown> | undefined): { tool_call_id?: string; return_value?: string; is_error?: boolean; output?: string; message?: string } {
   if (!evt) return {};
   const parsed = parseWireEvent(evt);
   const id = asString(parsed.flat["message.payload.tool_call_id"]) ?? asString(parsed.flat["payload.tool_call_id"]);
-  const isErr = parsed.flat["message.payload.is_error"] === true || parsed.flat["payload.is_error"] === true;
+  const isErr = parsed.flat["message.payload.is_error"] === true
+    || parsed.flat["payload.is_error"] === true
+    || parsed.flat["message.payload.return_value.is_error"] === true
+    || parsed.flat["payload.return_value.is_error"] === true;
   const rv = parsed.flat["message.payload.return_value"] ?? parsed.flat["payload.return_value"];
   let rvStr: string | undefined;
+  let output: string | undefined;
+  let message: string | undefined;
   if (rv !== undefined) {
-    rvStr = typeof rv === "string" ? rv : JSON.stringify(rv);
-    if (rvStr.length > 500) rvStr = rvStr.slice(0, 500) + "...";
+    if (typeof rv === "string") {
+      rvStr = rv.length > 500 ? rv.slice(0, 500) + "..." : rv;
+    } else if (typeof rv === "object" && rv !== null) {
+      const rvObj = rv as Record<string, unknown>;
+      output = typeof rvObj.output === "string" ? rvObj.output : undefined;
+      message = typeof rvObj.message === "string" ? rvObj.message : undefined;
+      rvStr = JSON.stringify(rv);
+      if (rvStr.length > 500) rvStr = rvStr.slice(0, 500) + "...";
+    }
   }
-  return { tool_call_id: id, return_value: rvStr, is_error: isErr };
+  return { tool_call_id: id, return_value: rvStr, is_error: isErr, output, message };
 }
 
 export function getApprovalRequestDetails(evt: Record<string, unknown> | undefined): { operation?: string; files?: string[] } {

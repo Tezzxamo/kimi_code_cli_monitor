@@ -12,6 +12,7 @@ import {
   getTextPartText,
   getToolCallSummary,
   getToolCallArgs,
+  getToolCallPartDetails,
   getToolResultDetails,
   getApprovalRequestDetails,
   getTokenUsage,
@@ -40,10 +41,12 @@ export default function EventCard({ msg, theme }: { msg: StreamMessage; theme: T
   const textPartText = msg.type === "wire" && effectiveKind === "TextPart" ? getTextPartText(effectiveEvent) : undefined;
   const toolCall = msg.type === "wire" && effectiveKind === "ToolCall" ? getToolCallSummary(effectiveEvent) : undefined;
   const toolArgs = msg.type === "wire" && effectiveKind === "ToolCall" ? getToolCallArgs(effectiveEvent) : undefined;
+  const toolCallPart = msg.type === "wire" && effectiveKind === "ToolCallPart" ? getToolCallPartDetails(effectiveEvent) : undefined;
   const toolResult = msg.type === "wire" && effectiveKind === "ToolResult" ? getToolResultDetails(effectiveEvent) : undefined;
   const approvalReq = msg.type === "wire" && effectiveKind === "ApprovalRequest" ? getApprovalRequestDetails(effectiveEvent) : undefined;
   const tokenUsage = msg.type === "wire" && effectiveKind === "StatusUpdate" ? getTokenUsage(effectiveEvent) : undefined;
   const turnBeginText = msg.type === "wire" && effectiveKind === "TurnBegin" ? getTurnBeginText(effectiveEvent) : undefined;
+  const replacedByText = ["TextPart", "ThinkPart", "TurnBegin", "TurnEnd", "StepBegin"].includes(effectiveKind);
 
   return (
     <div
@@ -57,14 +60,35 @@ export default function EventCard({ msg, theme }: { msg: StreamMessage; theme: T
           : {})
       }}
     >
-      <div
-        style={{
-          display: "flex",
-          alignItems: "flex-start",
-          gap: 8,
-          flexWrap: "wrap"
-        }}
-      >
+      <div style={{ display: "flex", flexWrap: "wrap", alignItems: "flex-start", gap: 8 }}>
+        {/* JSON 按钮占位（20px） */}
+        <div style={{ width: 20, height: 20, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, marginTop: 2 }}>
+          {!replacedByText ? (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                setJsonOpen((o) => !o);
+              }}
+              style={{
+                background: "transparent",
+                border: "none",
+                color: c.textMuted,
+                fontSize: 12,
+                cursor: "pointer",
+                padding: 0,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                width: "100%",
+                height: "100%"
+              }}
+              title={jsonOpen ? "收起 JSON" : "展开 JSON"}
+            >
+              {jsonOpen ? "▼" : "▶"}
+            </button>
+          ) : null}
+        </div>
+
         {isError ? (
           <span
             style={{
@@ -86,34 +110,9 @@ export default function EventCard({ msg, theme }: { msg: StreamMessage; theme: T
             !
           </span>
         ) : null}
-        <div
-          style={{ display: "flex", gap: 8, alignItems: "center", cursor: "pointer" }}
-          onClick={() => setJsonOpen((o) => !o)}
-        >
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              setJsonOpen((o) => !o);
-            }}
-            style={{
-              background: "transparent",
-              border: "none",
-              color: c.textMuted,
-              fontSize: 12,
-              cursor: "pointer",
-              padding: 0,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              width: 20,
-              height: 20
-            }}
-            title={jsonOpen ? "收起 JSON" : "展开 JSON"}
-          >
-            {jsonOpen ? "▼" : "▶"}
-          </button>
-          <span style={{ color: c.textSecondary, fontSize: 13 }}>{getEventDisplayTime(msg)}</span>
-          <span style={{ background: colors.bg, color: colors.fg, padding: "2px 8px", borderRadius: 999 }}>{kind}</span>
+
+        <span style={{ color: c.textSecondary, fontSize: 13 }}>{getEventDisplayTime(msg)}</span>
+        <span style={{ background: colors.bg, color: colors.fg, padding: "2px 8px", borderRadius: 999 }}>{kind}</span>
           {subagentInner ? (
             <>
               <span style={{ color: c.textMuted, fontSize: 12, userSelect: "none" }}>→</span>
@@ -130,9 +129,8 @@ export default function EventCard({ msg, theme }: { msg: StreamMessage; theme: T
               </span>
             </>
           ) : null}
-        </div>
 
-        {msg.type === "wire" ? (
+          {msg.type === "wire" ? (
           isError ? (
             (() => {
               const err = getErrorDetails(effectiveEvent);
@@ -177,15 +175,18 @@ export default function EventCard({ msg, theme }: { msg: StreamMessage; theme: T
                     {toolCall.id}
                   </code>
                 ) : null}
-                {toolCall.name ? <span style={{ color: c.text }}>{toolCall.name}()</span> : null}
+                {toolCall.name ? <span style={{ color: c.text }}>{toolCall.name}({toolArgs || ""})</span> : null}
               </div>
-              {toolArgs ? (
-                <pre style={{ margin: 0, background: c.codeBg, padding: 8, borderRadius: 6, fontSize: 12, overflow: "auto", border: `1px solid ${c.border}` }}>
-                  <code style={{ color: c.text }}>{toolArgs}</code>
-                </pre>
-              ) : null}
+              <pre style={{ margin: 0, background: c.codeBg, padding: 8, borderRadius: 6, fontSize: 12, overflow: "auto", border: `1px solid ${c.border}` }}>
+                <code style={{ color: c.text }}>{toolArgs || "(无参数)"}</code>
+              </pre>
             </div>
-          ) : toolResult && (toolResult.tool_call_id || toolResult.return_value) ? (
+          ) : toolCallPart?.arguments_part !== undefined ? (
+            <div style={{ flex: 1, minWidth: 0, fontSize: 13, lineHeight: 1.6 }}>
+              <span style={{ color: c.textMuted }}>arguments_part: </span>
+              <span style={{ color: c.text, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{toolCallPart.arguments_part}</span>
+            </div>
+          ) : toolResult && (toolResult.tool_call_id || toolResult.return_value || toolResult.output || toolResult.message) ? (
             <div style={{ flex: 1, minWidth: 0, fontSize: 13, lineHeight: 1.6, display: "flex", flexDirection: "column", gap: 4 }}>
               {toolResult.tool_call_id ? (
                 <div>
@@ -202,6 +203,30 @@ export default function EventCard({ msg, theme }: { msg: StreamMessage; theme: T
                   >
                     {toolResult.tool_call_id}
                   </code>
+                </div>
+              ) : null}
+              {toolResult.output !== undefined ? (
+                <div>
+                  <span style={{ color: c.textMuted }}>output: </span>
+                  <pre
+                    style={{
+                      margin: "4px 0 0",
+                      background: c.codeBg,
+                      padding: 8,
+                      borderRadius: 6,
+                      fontSize: 12,
+                      overflow: "auto",
+                      border: `1px solid ${c.border}`
+                    }}
+                  >
+                    <code style={{ color: c.text }}>{toolResult.output}</code>
+                  </pre>
+                </div>
+              ) : null}
+              {toolResult.message !== undefined ? (
+                <div>
+                  <span style={{ color: c.textMuted }}>message: </span>
+                  <span style={{ color: c.text, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{toolResult.message}</span>
                 </div>
               ) : null}
               {toolResult.return_value !== undefined ? (
@@ -301,31 +326,32 @@ export default function EventCard({ msg, theme }: { msg: StreamMessage; theme: T
             </>
           )
         ) : null}
-      </div>
 
-      {msg.type === "meta" ? (
-        <div style={{ marginTop: 8, fontSize: 13, lineHeight: 1.6 }}>
-          <span style={{ color: c.textMuted }}>session_id: </span>
-          <span style={{ color: c.text }}>{msg.session_id}</span>
+          {msg.type === "meta" ? (
+            <div style={{ fontSize: 13, lineHeight: 1.6 }}>
+              <span style={{ color: c.textMuted }}>session_id: </span>
+              <span style={{ color: c.text }}>{msg.session_id}</span>
+            </div>
+          ) : null}
+
+          {!replacedByText && jsonOpen ? (
+            <pre
+              style={{
+                margin: 0,
+                marginTop: 2,
+                background: c.jsonBg,
+                color: c.jsonText,
+                padding: 10,
+                borderRadius: 6,
+                overflow: "auto",
+                fontSize: 12
+              }}
+            >
+              {JSON.stringify(msg, null, 2)}
+            </pre>
+          ) : null}
         </div>
-      ) : null}
-
-      {jsonOpen ? (
-        <pre
-          style={{
-            marginTop: 6,
-            background: c.jsonBg,
-            color: c.jsonText,
-            padding: 10,
-            borderRadius: 6,
-            overflow: "auto",
-            fontSize: 12
-          }}
-        >
-          {JSON.stringify(msg, null, 2)}
-        </pre>
-      ) : null}
-    </div>
+      </div>
   );
 }
 

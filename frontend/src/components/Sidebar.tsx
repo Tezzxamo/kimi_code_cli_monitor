@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useEffect, useRef, useState } from "react";
 import type { SessionItem, Theme } from "../types";
 import { COLORS } from "../hooks/useTheme";
 import type { ThemeColors } from "../hooks/useTheme";
@@ -22,9 +22,14 @@ export default function Sidebar({
   setSidebarCollapsed,
   currentView,
   setCurrentView,
-  sessionSortBy,
-  setSessionSortBy,
   onRefresh,
+  onRenameSession,
+  onDeleteSession,
+  selectedSessionIds,
+  onToggleSelectSession,
+  onClearSelection,
+  onSelectAllSessions,
+  onBatchDeleteSessions,
 }: {
   theme: Theme;
   toggleTheme: () => void;
@@ -41,28 +46,22 @@ export default function Sidebar({
   setSidebarCollapsed: (v: boolean) => void;
   currentView: "monitor" | "statistics";
   setCurrentView: (v: "monitor" | "statistics") => void;
-  sessionSortBy: "updated_at" | "created_at" | "title" | "has_error";
-  setSessionSortBy: (v: "updated_at" | "created_at" | "title" | "has_error") => void;
   onRefresh: () => void;
+  onRenameSession: (id: string, title: string) => Promise<void>;
+  onDeleteSession: (id: string) => Promise<void>;
+  selectedSessionIds: Set<string>;
+  onToggleSelectSession: (id: string) => void;
+  onClearSelection: () => void;
+  onSelectAllSessions: (ids: string[]) => void;
+  onBatchDeleteSessions: (ids: string[]) => Promise<void>;
 }) {
   const c = COLORS[theme];
 
   const sortedSessions = React.useMemo(() => {
     const arr = [...sessions];
-    arr.sort((a, b) => {
-      switch (sessionSortBy) {
-        case "created_at":
-          return (b.created_at || 0) - (a.created_at || 0);
-        case "title":
-          return (a.title || "").localeCompare(b.title || "");
-        case "has_error":
-          return (b.has_error ? 1 : 0) - (a.has_error ? 1 : 0);
-        default:
-          return (b.updated_at || 0) - (a.updated_at || 0);
-      }
-    });
+    arr.sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
     return arr;
-  }, [sessions, sessionSortBy]);
+  }, [sessions]);
 
   const groupedSessions = React.useMemo(() => {
     const map = new Map<string, SessionItem[]>();
@@ -74,21 +73,10 @@ export default function Sidebar({
     return Array.from(map.entries())
       .map(([dir, items]) => ({
         dir,
-        items: items.sort((a, b) => {
-          switch (sessionSortBy) {
-            case "created_at":
-              return (b.created_at || 0) - (a.created_at || 0);
-            case "title":
-              return (a.title || "").localeCompare(b.title || "");
-            case "has_error":
-              return (b.has_error ? 1 : 0) - (a.has_error ? 1 : 0);
-            default:
-              return (b.updated_at || 0) - (a.updated_at || 0);
-          }
-        })
+        items: items.sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0))
       }))
       .sort((a, b) => a.dir.localeCompare(b.dir));
-  }, [sortedSessions, sessionSortBy]);
+  }, [sortedSessions]);
 
   const filteredGroups = React.useMemo(() => {
     const q = sidebarSearch.trim().toLowerCase();
@@ -116,6 +104,86 @@ export default function Sidebar({
         (s.work_dir && s.work_dir.toLowerCase().includes(q))
     );
   }, [sortedSessions, sidebarSearch]);
+
+  // Right-click context menu state
+  const [contextMenu, setContextMenu] = useState<{
+    x: number;
+    y: number;
+    sessionId: string;
+    sessionTitle: string;
+  } | null>(null);
+
+  // Inline editing state
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingValue, setEditingValue] = useState<string>("");
+  const editInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Close context menu on click outside
+  useEffect(() => {
+    function handleClick() {
+      setContextMenu(null);
+    }
+    if (contextMenu) {
+      window.addEventListener("click", handleClick);
+      return () => window.removeEventListener("click", handleClick);
+    }
+  }, [contextMenu]);
+
+  // Focus edit input when editing starts
+  useEffect(() => {
+    if (editingId && editInputRef.current) {
+      editInputRef.current.focus();
+      editInputRef.current.select();
+    }
+  }, [editingId]);
+
+  function handleContextMenu(e: React.MouseEvent, session: SessionItem) {
+    e.preventDefault();
+    e.stopPropagation();
+    setContextMenu({
+      x: e.clientX,
+      y: e.clientY,
+      sessionId: session.session_id,
+      sessionTitle: session.title || session.session_id,
+    });
+  }
+
+  function startRename(sessionId: string, currentTitle: string) {
+    setContextMenu(null);
+    setEditingId(sessionId);
+    setEditingValue(currentTitle);
+  }
+
+  async function commitRename(sessionId: string) {
+    const value = editingValue.trim();
+    setEditingId(null);
+    setEditingValue("");
+    if (value) {
+      try {
+        await onRenameSession(sessionId, value);
+      } catch (err) {
+        console.error("Rename failed:", err);
+        window.alert("重命名失败: " + (err instanceof Error ? err.message : String(err)));
+      }
+    }
+  }
+
+  function cancelRename() {
+    setEditingId(null);
+    setEditingValue("");
+  }
+
+  async function confirmDelete(sessionId: string) {
+    setContextMenu(null);
+    if (window.confirm("确定要删除该会话吗？此操作不可恢复。")) {
+      try {
+        await onDeleteSession(sessionId);
+      } catch (err) {
+        console.error("Delete failed:", err);
+        window.alert("删除失败: " + (err instanceof Error ? err.message : String(err)));
+      }
+    }
+  }
 
   const sb = {
     bg: c.sidebarBg,
@@ -203,7 +271,8 @@ export default function Sidebar({
         minHeight: 0,
         color: sb.text,
         overflow: "hidden",
-        transition: "flex 0.2s, width 0.2s"
+        transition: "flex 0.2s, width 0.2s",
+        position: "relative"
       }}
     >
       <div style={{ padding: "14px 14px 10px" }}>
@@ -306,26 +375,6 @@ export default function Sidebar({
               outline: "none"
             }}
           />
-          <select
-            value={sessionSortBy}
-            onChange={(e) => setSessionSortBy(e.target.value as typeof sessionSortBy)}
-            style={{
-              background: sb.inputBg,
-              border: `1px solid ${sb.inputBorder}`,
-              borderRadius: 8,
-              padding: "7px 8px",
-              color: sb.text,
-              fontSize: 12,
-              outline: "none",
-              cursor: "pointer"
-            }}
-            title="排序方式"
-          >
-            <option value="updated_at">更新时间</option>
-            <option value="created_at">创建时间</option>
-            <option value="title">标题</option>
-            <option value="has_error">异常优先</option>
-          </select>
         </div>
 
         <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
@@ -370,7 +419,7 @@ export default function Sidebar({
         </div>
       </div>
 
-      <div style={{ flex: 1, minHeight: 0, overflow: "auto" }}>
+      <div style={{ flex: 1, minHeight: 0, overflow: "hidden" }}>
         {sidebarListMode === "tree" ? (
           <TreeView
             groups={filteredGroups}
@@ -379,6 +428,16 @@ export default function Sidebar({
             selectedSessionId={selectedSessionId}
             onSelectSession={onSelectSession}
             colors={c}
+            editingId={editingId}
+            editingValue={editingValue}
+            editInputRef={editInputRef}
+            onStartEdit={startRename}
+            onCommitEdit={commitRename}
+            onCancelEdit={cancelRename}
+            onSetEditingValue={setEditingValue}
+            onContextMenuSession={handleContextMenu}
+            selectedSessionIds={selectedSessionIds}
+            onToggleSelectSession={onToggleSelectSession}
           />
         ) : (
           <ListView
@@ -386,31 +445,149 @@ export default function Sidebar({
             selectedSessionId={selectedSessionId}
             onSelectSession={onSelectSession}
             colors={c}
+            editingId={editingId}
+            editingValue={editingValue}
+            editInputRef={editInputRef}
+            onStartEdit={startRename}
+            onCommitEdit={commitRename}
+            onCancelEdit={cancelRename}
+            onSetEditingValue={setEditingValue}
+            onContextMenuSession={handleContextMenu}
+            selectedSessionIds={selectedSessionIds}
+            onToggleSelectSession={onToggleSelectSession}
           />
         )}
       </div>
 
-      <div style={{ padding: "10px 14px", borderTop: `1px solid ${sb.border}`, display: "flex", justifyContent: "flex-end" }}>
-        <button
-          onClick={() => setSidebarCollapsed(true)}
-          style={{
-            width: 28,
-            height: 28,
-            borderRadius: 6,
-            border: `1px solid ${sb.btnBorder}`,
-            background: sb.btnBg,
-            color: sb.btnText,
-            fontSize: 14,
-            cursor: "pointer",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center"
-          }}
-          title="收起侧边栏"
-        >
-          ◀
-        </button>
+      {/* Batch actions bar */}
+      <div style={{ padding: "8px 14px", borderTop: `1px solid ${sb.border}`, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <input
+            type="checkbox"
+            checked={filteredList.length > 0 && filteredList.every((s) => selectedSessionIds.has(s.session_id))}
+            onChange={() => {
+              if (filteredList.every((s) => selectedSessionIds.has(s.session_id))) {
+                onClearSelection();
+              } else {
+                onSelectAllSessions(filteredList.map((s) => s.session_id));
+              }
+            }}
+            style={{ width: 14, height: 14, cursor: "pointer" }}
+          />
+          <span style={{ fontSize: 12, color: sb.textMuted }}>
+            已选择 {selectedSessionIds.size} 项
+          </span>
+        </div>
+        <div style={{ display: "flex", gap: 6 }}>
+          <button
+            onClick={() => {
+              const ids = Array.from(selectedSessionIds);
+              if (ids.length === 0) return;
+              if (window.confirm(`确定要删除选中的 ${ids.length} 个会话吗？此操作不可恢复。`)) {
+                onBatchDeleteSessions(ids).catch((err) => {
+                  console.error("Batch delete failed:", err);
+                  window.alert("批量删除失败: " + (err instanceof Error ? err.message : String(err)));
+                });
+              }
+            }}
+            disabled={selectedSessionIds.size === 0}
+            style={{
+              padding: "4px 10px",
+              borderRadius: 6,
+              border: `1px solid ${selectedSessionIds.size === 0 ? "#9ca3af" : "#ef4444"}`,
+              background: selectedSessionIds.size === 0 ? "transparent" : "rgba(239,68,68,0.1)",
+              color: selectedSessionIds.size === 0 ? "#9ca3af" : "#ef4444",
+              fontSize: 12,
+              cursor: selectedSessionIds.size === 0 ? "not-allowed" : "pointer",
+            }}
+          >
+            删除选中
+          </button>
+          <button
+            onClick={() => setSidebarCollapsed(true)}
+            style={{
+              width: 28,
+              height: 28,
+              borderRadius: 6,
+              border: `1px solid ${sb.btnBorder}`,
+              background: sb.btnBg,
+              color: sb.btnText,
+              fontSize: 14,
+              cursor: "pointer",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center"
+            }}
+            title="收起侧边栏"
+          >
+            ◀
+          </button>
+        </div>
       </div>
+
+      {/* Context Menu */}
+      {contextMenu ? (
+        <div
+          onClick={(e) => e.stopPropagation()}
+          style={{
+            position: "fixed",
+            left: contextMenu.x,
+            top: contextMenu.y,
+            zIndex: 1000,
+            background: c.sidebarBg,
+            border: `1px solid ${c.sidebarBorder}`,
+            borderRadius: 8,
+            boxShadow: theme === "dark" ? "0 4px 16px rgba(0,0,0,0.5)" : "0 4px 16px rgba(0,0,0,0.12)",
+            padding: "4px 0",
+            minWidth: 120,
+            fontSize: 13,
+          }}
+        >
+          <button
+            onClick={() => startRename(contextMenu.sessionId, contextMenu.sessionTitle)}
+            style={{
+              width: "100%",
+              padding: "8px 14px",
+              background: "transparent",
+              border: "none",
+              color: c.sidebarText,
+              fontSize: 13,
+              cursor: "pointer",
+              textAlign: "left",
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+            }}
+            onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = c.sidebarActiveBg; }}
+            onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "transparent"; }}
+          >
+            <span>✏️</span>
+            <span>重命名</span>
+          </button>
+          <div style={{ height: 1, background: c.sidebarBorder, margin: "2px 8px" }} />
+          <button
+            onClick={() => confirmDelete(contextMenu.sessionId)}
+            style={{
+              width: "100%",
+              padding: "8px 14px",
+              background: "transparent",
+              border: "none",
+              color: "#ef4444",
+              fontSize: 13,
+              cursor: "pointer",
+              textAlign: "left",
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+            }}
+            onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = theme === "dark" ? "rgba(239,68,68,0.15)" : "rgba(239,68,68,0.08)"; }}
+            onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "transparent"; }}
+          >
+            <span>🗑️</span>
+            <span>删除</span>
+          </button>
+        </div>
+      ) : null}
     </aside>
   );
 }
@@ -422,6 +599,16 @@ function TreeView({
   selectedSessionId,
   onSelectSession,
   colors,
+  editingId,
+  editingValue,
+  editInputRef,
+  onStartEdit,
+  onCommitEdit,
+  onCancelEdit,
+  onSetEditingValue,
+  onContextMenuSession,
+  selectedSessionIds,
+  onToggleSelectSession,
 }: {
   groups: Array<{ dir: string; items: SessionItem[] }>;
   expandedDirs: Set<string>;
@@ -429,6 +616,16 @@ function TreeView({
   selectedSessionId: string;
   onSelectSession: (id: string) => void;
   colors: ThemeColors;
+  editingId: string | null;
+  editingValue: string;
+  editInputRef: React.RefObject<HTMLInputElement | null>;
+  onStartEdit: (id: string, title: string) => void;
+  onCommitEdit: (id: string) => void;
+  onCancelEdit: () => void;
+  onSetEditingValue: (v: string) => void;
+  onContextMenuSession: (e: React.MouseEvent, session: SessionItem) => void;
+  selectedSessionIds: Set<string>;
+  onToggleSelectSession: (id: string) => void;
 }) {
   if (groups.length === 0) {
     return (
@@ -476,26 +673,34 @@ function TreeView({
               <div>
                 {group.items.map((s) => {
                   const isSelected = s.session_id === selectedSessionId;
+                  const isEditing = s.session_id === editingId;
                   const displayTitle = s.title || truncateText(s.session_id, 24);
+                  const isChecked = selectedSessionIds.has(s.session_id);
                   return (
-                    <button
+                    <div
                       key={s.session_id}
-                      onClick={() => onSelectSession(s.session_id)}
+                      onContextMenu={(e) => onContextMenuSession(e, s)}
                       style={{
-                        width: "100%",
-                        padding: "6px 16px 6px 34px",
-                        background: isSelected ? colors.sidebarActiveBg : "transparent",
-                        border: "none",
-                        color: isSelected ? colors.sidebarText : colors.sidebarTextSecondary,
-                        fontSize: 13,
-                        cursor: "pointer",
-                        textAlign: "left",
                         display: "flex",
                         alignItems: "center",
-                        gap: 8,
-                        borderLeft: isSelected ? `2px solid ${colors.sidebarActiveBorder}` : "2px solid transparent"
+                        background: isSelected ? colors.sidebarActiveBg : "transparent",
+                        borderLeft: isSelected ? `2px solid ${colors.sidebarActiveBorder}` : "2px solid transparent",
+                        padding: "0 16px 0 30px",
                       }}
                     >
+                      <input
+                        type="checkbox"
+                        checked={isChecked}
+                        onChange={() => onToggleSelectSession(s.session_id)}
+                        onClick={(e) => e.stopPropagation()}
+                        style={{
+                          width: 14,
+                          height: 14,
+                          marginRight: 6,
+                          flexShrink: 0,
+                          cursor: "pointer",
+                        }}
+                      />
                       <span
                         style={{
                           width: 6,
@@ -504,16 +709,58 @@ function TreeView({
                           background: isSelected
                             ? colors.sidebarIndicator
                             : colors.sidebarIndicatorInactive,
-                          flexShrink: 0
+                          flexShrink: 0,
+                          marginRight: 8,
                         }}
                       />
-                      <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        {displayTitle}
-                      </span>
-                      {isSelected ? (
-                        <span style={{ fontSize: 10, color: colors.sidebarTextMuted }}>当前</span>
+                      {isEditing ? (
+                        <input
+                          ref={editInputRef}
+                          value={editingValue}
+                          onChange={(e) => onSetEditingValue(e.target.value)}
+                          onBlur={() => onCommitEdit(s.session_id)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") onCommitEdit(s.session_id);
+                            if (e.key === "Escape") onCancelEdit();
+                          }}
+                          style={{
+                            flex: 1,
+                            minWidth: 0,
+                            background: colors.sidebarInputBg,
+                            border: `1px solid ${colors.sidebarInputBorder}`,
+                            borderRadius: 4,
+                            padding: "4px 8px",
+                            color: colors.sidebarText,
+                            fontSize: 13,
+                            outline: "none",
+                            margin: "4px 0",
+                          }}
+                        />
+                      ) : (
+                        <button
+                          onClick={() => onSelectSession(s.session_id)}
+                          style={{
+                            flex: 1,
+                            minWidth: 0,
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                            background: "transparent",
+                            border: "none",
+                            color: isSelected ? colors.sidebarText : colors.sidebarTextSecondary,
+                            fontSize: 13,
+                            cursor: "pointer",
+                            textAlign: "left",
+                            padding: "6px 0",
+                          }}
+                        >
+                          {displayTitle}
+                        </button>
+                      )}
+                      {isSelected && !isEditing ? (
+                        <span style={{ fontSize: 10, color: colors.sidebarTextMuted, marginLeft: 4 }}>当前</span>
                       ) : null}
-                    </button>
+                    </div>
                   );
                 })}
               </div>
@@ -530,11 +777,31 @@ function ListView({
   selectedSessionId,
   onSelectSession,
   colors,
+  editingId,
+  editingValue,
+  editInputRef,
+  onStartEdit,
+  onCommitEdit,
+  onCancelEdit,
+  onSetEditingValue,
+  onContextMenuSession,
+  selectedSessionIds,
+  onToggleSelectSession,
 }: {
   sessions: SessionItem[];
   selectedSessionId: string;
   onSelectSession: (id: string) => void;
   colors: ThemeColors;
+  editingId: string | null;
+  editingValue: string;
+  editInputRef: React.RefObject<HTMLInputElement | null>;
+  onStartEdit: (id: string, title: string) => void;
+  onCommitEdit: (id: string) => void;
+  onCancelEdit: () => void;
+  onSetEditingValue: (v: string) => void;
+  onContextMenuSession: (e: React.MouseEvent, session: SessionItem) => void;
+  selectedSessionIds: Set<string>;
+  onToggleSelectSession: (id: string) => void;
 }) {
   if (sessions.length === 0) {
     return (
@@ -548,26 +815,34 @@ function ListView({
     <div style={{ padding: "4px 0" }}>
       {sessions.map((s) => {
         const isSelected = s.session_id === selectedSessionId;
+        const isEditing = s.session_id === editingId;
         const displayTitle = s.title || truncateText(s.session_id, 28);
+        const isChecked = selectedSessionIds.has(s.session_id);
         return (
-          <button
+          <div
             key={s.session_id}
-            onClick={() => onSelectSession(s.session_id)}
+            onContextMenu={(e) => onContextMenuSession(e, s)}
             style={{
-              width: "100%",
-              padding: "8px 16px",
-              background: isSelected ? colors.sidebarActiveBg : "transparent",
-              border: "none",
-              color: isSelected ? colors.sidebarText : colors.sidebarTextSecondary,
-              fontSize: 13,
-              cursor: "pointer",
-              textAlign: "left",
               display: "flex",
               alignItems: "center",
-              gap: 8,
-              borderLeft: isSelected ? `2px solid ${colors.sidebarActiveBorder}` : "2px solid transparent"
+              background: isSelected ? colors.sidebarActiveBg : "transparent",
+              borderLeft: isSelected ? `2px solid ${colors.sidebarActiveBorder}` : "2px solid transparent",
+              padding: "0 16px 0 12px",
             }}
           >
+            <input
+              type="checkbox"
+              checked={isChecked}
+              onChange={() => onToggleSelectSession(s.session_id)}
+              onClick={(e) => e.stopPropagation()}
+              style={{
+                width: 14,
+                height: 14,
+                marginRight: 6,
+                flexShrink: 0,
+                cursor: "pointer",
+              }}
+            />
             <span
               style={{
                 width: 6,
@@ -576,16 +851,58 @@ function ListView({
                 background: isSelected
                   ? colors.sidebarIndicator
                   : colors.sidebarIndicatorInactive,
-                flexShrink: 0
+                flexShrink: 0,
+                marginRight: 8,
               }}
             />
-            <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-              {displayTitle}
-            </span>
-            {isSelected ? (
-              <span style={{ fontSize: 10, color: colors.sidebarTextMuted }}>当前</span>
+            {isEditing ? (
+              <input
+                ref={editInputRef}
+                value={editingValue}
+                onChange={(e) => onSetEditingValue(e.target.value)}
+                onBlur={() => onCommitEdit(s.session_id)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") onCommitEdit(s.session_id);
+                  if (e.key === "Escape") onCancelEdit();
+                }}
+                style={{
+                  flex: 1,
+                  minWidth: 0,
+                  background: colors.sidebarInputBg,
+                  border: `1px solid ${colors.sidebarInputBorder}`,
+                  borderRadius: 4,
+                  padding: "4px 8px",
+                  color: colors.sidebarText,
+                  fontSize: 13,
+                  outline: "none",
+                  margin: "4px 0",
+                }}
+              />
+            ) : (
+              <button
+                onClick={() => onSelectSession(s.session_id)}
+                style={{
+                  flex: 1,
+                  minWidth: 0,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                  background: "transparent",
+                  border: "none",
+                  color: isSelected ? colors.sidebarText : colors.sidebarTextSecondary,
+                  fontSize: 13,
+                  cursor: "pointer",
+                  textAlign: "left",
+                  padding: "8px 0",
+                }}
+              >
+                {displayTitle}
+              </button>
+            )}
+            {isSelected && !isEditing ? (
+              <span style={{ fontSize: 10, color: colors.sidebarTextMuted, marginLeft: 4 }}>当前</span>
             ) : null}
-          </button>
+          </div>
         );
       })}
     </div>

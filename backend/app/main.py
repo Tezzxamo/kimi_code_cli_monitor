@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import shutil
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
+
+from pydantic import BaseModel
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -310,6 +313,87 @@ def get_statistics() -> JSONResponse:
     }
     _statistics_cache[cache_key] = (now, result)
     return JSONResponse(result)
+
+
+class RenamePayload(BaseModel):
+    title: str
+
+
+class BatchDeletePayload(BaseModel):
+    session_ids: list[str]
+
+
+@app.put("/api/sessions/{session_id}")
+def rename_session(session_id: str, payload: RenamePayload) -> JSONResponse:
+    """
+    修改会话标题：读取 state.json，更新/添加 title 字段。
+    """
+    settings = get_settings()
+    s = resolve_session(settings.kimi_share_dir, session_id)
+    if not s:
+        raise HTTPException(status_code=404, detail="session not found")
+
+    data = {}
+    if s.state_path.exists():
+        try:
+            data = json.loads(s.state_path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    data["title"] = payload.title.strip()
+    try:
+        s.state_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"failed to write state.json: {exc}")
+
+    return JSONResponse({
+        "session_id": session_id,
+        "title": payload.title.strip(),
+    })
+
+
+@app.delete("/api/sessions/{session_id}")
+def delete_session(session_id: str) -> JSONResponse:
+    """
+    删除整个会话目录（包含 wire.jsonl、state.json 等）。
+    """
+    settings = get_settings()
+    s = resolve_session(settings.kimi_share_dir, session_id)
+    if not s:
+        raise HTTPException(status_code=404, detail="session not found")
+
+    try:
+        shutil.rmtree(s.session_dir)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"failed to delete session directory: {exc}")
+    return JSONResponse({"deleted": True, "session_id": session_id})
+
+
+@app.post("/api/sessions/batch-delete")
+def batch_delete_sessions(payload: BatchDeletePayload) -> JSONResponse:
+    """
+    批量删除会话目录。
+    """
+    settings = get_settings()
+    deleted: list[str] = []
+    not_found: list[str] = []
+    errors: list[dict] = []
+
+    for session_id in payload.session_ids:
+        s = resolve_session(settings.kimi_share_dir, session_id)
+        if not s:
+            not_found.append(session_id)
+            continue
+        try:
+            shutil.rmtree(s.session_dir)
+            deleted.append(session_id)
+        except Exception as exc:
+            errors.append({"session_id": session_id, "error": str(exc)})
+
+    return JSONResponse({
+        "deleted": deleted,
+        "not_found": not_found,
+        "errors": errors,
+    })
 
 
 @app.get("/api/sessions/{session_id}/summary")

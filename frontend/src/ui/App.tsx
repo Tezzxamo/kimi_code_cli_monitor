@@ -62,7 +62,8 @@ export function App() {
   const [sidebarListMode, setSidebarListMode] = useState<"list" | "tree">("tree");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [currentView, setCurrentView] = useState<"monitor" | "statistics">("monitor");
-  const [sessionSortBy, setSessionSortBy] = useState<"updated_at" | "created_at" | "title" | "has_error">("updated_at");
+  const [selectedSessionIds, setSelectedSessionIds] = useState<Set<string>>(new Set());
+
   const [statistics, setStatistics] = useState<StatisticsResponse | null>(null);
   const [sseReconnectTrigger, setSseReconnectTrigger] = useState<number>(0);
 
@@ -219,6 +220,92 @@ export function App() {
       const stillExists = data.sessions.some((s) => s.session_id === prev);
       return stillExists ? prev : "";
     });
+  }
+
+  async function renameSession(sessionId: string, newTitle: string) {
+    const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: newTitle }),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      console.error("rename failed:", res.status, text);
+      throw new Error(`rename http ${res.status}: ${text}`);
+    }
+    await refreshSessions();
+  }
+
+  async function deleteSession(sessionId: string) {
+    const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+      method: "DELETE",
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      console.error("delete failed:", res.status, text);
+      throw new Error(`delete http ${res.status}: ${text}`);
+    }
+    if (selectedSessionId === sessionId) {
+      setSelectedSessionId("");
+      setEvents([]);
+      setStatus("请选择会话");
+    }
+    setSelectedSessionIds((prev) => {
+      const next = new Set(prev);
+      next.delete(sessionId);
+      return next;
+    });
+    await refreshSessions();
+  }
+
+  function toggleSelectSession(sessionId: string) {
+    setSelectedSessionIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(sessionId)) next.delete(sessionId);
+      else next.add(sessionId);
+      return next;
+    });
+  }
+
+  function clearSelection() {
+    setSelectedSessionIds(new Set());
+  }
+
+  function selectAllSessions(sessionIds: string[]) {
+    setSelectedSessionIds((prev) => {
+      const next = new Set(prev);
+      sessionIds.forEach((id) => next.add(id));
+      return next;
+    });
+  }
+
+  async function batchDeleteSessions(sessionIds: string[]) {
+    if (sessionIds.length === 0) return;
+    const res = await fetch("/api/sessions/batch-delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_ids: sessionIds }),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      console.error("batch delete failed:", res.status, text);
+      throw new Error(`batch delete http ${res.status}: ${text}`);
+    }
+    const result = (await res.json()) as { deleted: string[]; not_found: string[]; errors: { session_id: string; error: string }[] };
+    if (result.errors.length > 0) {
+      console.error("batch delete partial errors:", result.errors);
+    }
+    setSelectedSessionIds((prev) => {
+      const next = new Set(prev);
+      sessionIds.forEach((id) => next.delete(id));
+      return next;
+    });
+    if (sessionIds.includes(selectedSessionId)) {
+      setSelectedSessionId("");
+      setEvents([]);
+      setStatus("请选择会话");
+    }
+    await refreshSessions();
   }
 
   async function fetchSessionSummary(sessionId: string) {
@@ -547,7 +634,8 @@ export function App() {
   const pageShellStyle: React.CSSProperties = {
     fontFamily: "Inter, system-ui, -apple-system, Segoe UI, sans-serif",
     background: c.bg,
-    minHeight: "100vh",
+    height: "100vh",
+    overflow: "hidden",
     color: c.text,
     display: "flex",
     flexDirection: "column"
@@ -679,9 +767,14 @@ export function App() {
           setSidebarCollapsed={setSidebarCollapsed}
           currentView={currentView}
           setCurrentView={setCurrentView}
-          sessionSortBy={sessionSortBy}
-          setSessionSortBy={setSessionSortBy}
           onRefresh={() => { refreshSessions().catch(() => void 0); fetchStatistics().catch(() => void 0); }}
+          onRenameSession={renameSession}
+          onDeleteSession={deleteSession}
+          selectedSessionIds={selectedSessionIds}
+          onToggleSelectSession={toggleSelectSession}
+          onClearSelection={clearSelection}
+          onSelectAllSessions={selectAllSessions}
+          onBatchDeleteSessions={batchDeleteSessions}
         />
 
         <main style={mainMonitorStyle}>
